@@ -14,7 +14,7 @@ yadif=0 would halve the frame rate and throw away half the real motion. Detected
 file from the stream rather than hardcoded.
 
 ASPECT: SAR 7:6 -- the video's declared square samples are WRONG for how the PS2
-showed it. Ground truth from the game executable (see docs/formats/FMV.md §5): the
+showed it. Ground truth from the game executable (see docs/formats/FMV.md §5a): the
 game runs a 512x448 NTSC framebuffer (sceGsResetGraph(0,1,2,0) then w=512,h=448) on
 a 4:3 TV, so SAR = (4/3)/(512/448) = 7:6 -- pixels 16.7% wider than tall. setsar
 tags it rather than rescaling, so no resampling loss; the player does the stretch.
