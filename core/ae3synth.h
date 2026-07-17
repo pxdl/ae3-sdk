@@ -16,6 +16,13 @@
  * sample-accurate, decoupled from any host frame rate. */
 #define AE3_RATE 48000
 
+/* The SPU2's 48 hardware voices (one pool shared by music and SE; the driver
+ * grants round-robin and never steals -- docs/formats/BGM.md) and the driver's
+ * 60 Hz update tick, on which slots free and tick-mode events dispatch. */
+#define AE3_NVOICES      48
+#define AE3_TICK_HZ      60                        /* NTSC; PAL boots with 50 */
+#define AE3_TICK_SAMPLES (AE3_RATE / AE3_TICK_HZ)  /* 800 */
+
 typedef struct ae3_synth ae3_synth;
 
 /* Parse-time facts about the loaded bank + sequence, for harnesses and A/B checks. */
@@ -179,5 +186,66 @@ int ae3_synth_render(ae3_synth *s, float *out, int nframes);
 
 bool ae3_synth_done(const ae3_synth *s);
 void ae3_synth_get_stats(const ae3_synth *s, ae3_stats *out);
+
+/* ---- playback introspection (read-only) ---------------------------------------
+ * The surface a visualizer needs: piano roll, slot grid, loop-unwound playhead.
+ * Promoted in W1 from the GUI harness's former white-box peeks; bgmplay is the
+ * reference consumer, the web player's worklet snapshot is built from the same
+ * calls. */
+
+/* Absolute sample position on the 48 kHz clock (monotonic; loops keep counting). */
+uint64_t ae3_synth_pos(const ae3_synth *s);
+
+/* One voice slot's live state. Slots free only at the 60 Hz update tick (the
+ * driver's ENVX<2 poll), so in_use outlives audibility slightly -- the real
+ * allocator behavior, worth showing truthfully in a slot view. */
+typedef struct {
+    bool    in_use;             /* slot bound to a note */
+    bool    active;             /* still rendering (envelope alive) */
+    bool    released;           /* key-off seen, envelope in release */
+    uint8_t ch, key;
+    int32_t env;                /* SPU2 envelope level, 0..0x7FFF, linear */
+} ae3_voice_state;
+
+/* Copy slot i's state (0..AE3_NVOICES-1). Returns false if i is out of range. */
+bool ae3_synth_voice(const ae3_synth *s, int i, ae3_voice_state *out);
+
+/* Parsed-sequence event kinds. The LOOP/HOOK kinds are CCs the game's SMF
+ * walker consumes (FUN_00402108) -- classified at parse time and never
+ * dispatched into the driver's channel state, like hardware. LOOP_START =
+ * CC99 v20, LOOP_END = CC99 v30, LOOP_COUNT = CC102, HOOK = CC90. */
+enum { AE3_EV_CH, AE3_EV_TEMPO, AE3_EV_END,
+       AE3_EV_LOOP_START, AE3_EV_LOOP_END, AE3_EV_LOOP_COUNT, AE3_EV_HOOK };
+
+typedef struct {
+    uint32_t tick;              /* original-timeline MIDI tick */
+    uint8_t  kind;              /* AE3_EV_* */
+    uint8_t  status, a, b;      /* AE3_EV_CH: status byte + data bytes */
+    uint32_t uspqn;             /* AE3_EV_TEMPO: microseconds per quarter note */
+} ae3_seq_event;
+
+/* Event count (0 when no sequence is loaded), per-event copy (false = index out
+ * of range), and the sequence's PPQN (0 when none loaded). Timeline builders
+ * walk these once at load to derive note spans, tempo map and loop markers. */
+int      ae3_synth_seq_events(const ae3_synth *s);
+bool     ae3_synth_seq_event(const ae3_synth *s, int i, ae3_seq_event *out);
+uint16_t ae3_synth_seq_ppqn(const ae3_synth *s);
+
+/* The sequencer's live tempo segment + loop bookkeeping -- everything needed to
+ * map the render position back onto the single-pass timeline:
+ *     eff_tick      = seg_tick + (pos - seg_sample) / spt
+ *     original tick = eff_tick - tick_offset
+ * then original tick -> sample through a tempo map built from the events above
+ * (bgmplay's display_pos/tmap_sample; the TS port mirrors it). tick_offset
+ * accumulates one loop-body length per loop-end jump; 0 = no jump taken yet.
+ * BPM display: 60 * AE3_RATE / (spt * ppqn). */
+typedef struct {
+    uint64_t seg_tick;          /* effective tick at the tempo-segment origin */
+    double   seg_sample;        /* sample position of the segment origin */
+    double   spt;               /* samples per tick at AE3_RATE */
+    uint64_t tick_offset;       /* accumulated loop-unroll tick shift */
+} ae3_clock;
+
+void ae3_synth_clock(const ae3_synth *s, ae3_clock *out);
 
 #endif /* AE3SYNTH_H */

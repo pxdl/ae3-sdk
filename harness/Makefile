@@ -16,7 +16,7 @@ bgmplay: bgmplay.o $(CORELIB)
 wavdump.o: wavdump.c $(CORE)/ae3synth.h $(CORE)/internal.h
 	$(CC) $(CFLAGS) -I$(CORE) -c wavdump.c
 
-bgmplay.o: bgmplay.c $(CORE)/ae3synth.h $(CORE)/internal.h
+bgmplay.o: bgmplay.c $(CORE)/ae3synth.h
 	$(CC) $(CFLAGS) -I$(CORE) $(shell pkg-config --cflags sdl2) -c bgmplay.c
 
 $(CORELIB):

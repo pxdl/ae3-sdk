@@ -1,11 +1,12 @@
 /* bgmplay -- SDL2 GUI harness: real-time song playback with a piano-roll note
  * visualizer, the 48-slot voice pool, and a scrolling stereo waveform strip.
  *
- * Same standing as wavdump: a test harness over the pure core (includes internal.h
- * to peek voice/sequencer state read-only; the core itself stays engine-agnostic).
- * Song list, bank pairing and AUTHORED per-song volumes come from the game's own
- * mastering table (a TSV derived from the game's own bgm_desc database, read at
- * runtime, never shipped -- trunc(127 x volume_scale) at slider 1.0), so orphan sequences resolve to the bank the game's cue table names.
+ * Reference consumer of the core's PUBLIC API (ae3synth.h only; the W1
+ * introspection calls cover every read the visualizer needs -- wavdump remains
+ * the white-box harness). Song list, bank pairing and AUTHORED per-song volumes
+ * come from the game's own mastering database (bgm_desc.exdb, read from the
+ * extracted tree at runtime, never shipped -- trunc(127 x volume_scale) at
+ * slider 1.0), so orphan sequences resolve to the bank the game's cue table names.
  *
  * Audio: SDL callback pulls ae3_synth_render under a mutex (the core renders ~460x
  * real time, so the lock is held microseconds per block). The GUI thread takes the
@@ -26,7 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "internal.h"
+#include "ae3synth.h"
 
 /* ---- layout ------------------------------------------------------------- */
 #define WIN_W     1280
@@ -145,7 +146,7 @@ static void dtext(int x, int y, int sc, SDL_Color c, const char *fmt, ...)
     dtextv(x, y, sc, c, buf);
 }
 
-/* ---- song table (from the game's mastering TSV) ------------------------- */
+/* ---- song table (from the game's own mastering DB, bgm_desc.exdb) ------- */
 typedef struct {
     char name[64];              /* midi basename without .mid */
     char mid[64], hd[64], bd[64];
@@ -194,39 +195,73 @@ static uint8_t *read_file(const char *path, size_t *len)
     return buf;
 }
 
-static int load_song_table(const char *tsv_path)
+/* Minimal reader for the game's self-describing "EDB" tables (reference parser:
+ * tools/ae3tools/exdb.py): plain-text header lines, 'U' padding up to the record
+ * base, then nrecords x sizest raw little-endian records. Fields are pulled BY
+ * NAME like the game's own EE reader; strings are NUL-terminated char[32].
+ * One record per cue -- multiple cues share a .mid, so dedup keeps the first.
+ * songvol = trunc(127 x volume_scale x slider x dolby) at slider 1.0, stereo
+ * (the value the game writes to the driver at cue start; cap 126). */
+static int load_song_table(const char *exdb_path)
 {
     size_t n;
-    char *txt = (char *)read_file(tsv_path, &n);
-    if (!txt) return -1;
-    txt = realloc(txt, n + 1);
-    txt[n] = 0;
-    Songs = calloc(128, sizeof *Songs);
-    for (char *line = strtok(txt, "\n"); line; line = strtok(NULL, "\n")) {
-        if (line[0] == '#') continue;
-        char *col[8] = {0};
-        int nc = 0;
-        for (char *p = line; p && nc < 8; ) {
-            col[nc++] = p;
-            p = strchr(p, '\t');
-            if (p) *p++ = 0;
+    uint8_t *d = read_file(exdb_path, &n);
+    if (!d || n < 8 || memcmp(d, "EDB\n", 4) != 0) { free(d); return -1; }
+    int nrec = 0, size = 0, base = 0;
+    int off_midi = -1, off_vh = -1, off_vb = -1, off_vs = -1;
+    size_t p = 4;
+    while (p < n && d[p] != 'U') {
+        char line[128];
+        size_t e = p;
+        while (e < n && d[e] != '\n' && e - p < sizeof line - 1) e++;
+        memcpy(line, d + p, e - p);
+        line[e - p] = 0;
+        p = e + 1;
+        char t, nm[64];
+        int off;
+        if (sscanf(line, "stn:%*[^:]:%*d:%d", &nrec) == 1) continue;
+        if (sscanf(line, "sizest:%d", &size) == 1) continue;
+        if (sscanf(line, "b:%d", &base) == 1) continue;
+        if (sscanf(line, "%c:%d:%63s", &t, &off, nm) == 3 && off >= 0) {
+            if      (t == 's' && !strcmp(nm, "midi"))         off_midi = off;
+            else if (t == 's' && !strcmp(nm, "vh"))           off_vh = off;
+            else if (t == 's' && !strcmp(nm, "vb"))           off_vb = off;
+            else if (t == 'f' && !strcmp(nm, "volume_scale")) off_vs = off;
         }
-        if (nc < 7) continue;
-        size_t ml = strlen(col[1]);
-        if (ml < 5 || ml >= 64 || strcmp(col[1] + ml - 4, ".mid") != 0) continue;
+    }
+    if (nrec <= 0 || size <= 0 || base <= 0 ||
+        off_midi < 0 || off_vh < 0 || off_vb < 0 || off_vs < 0 ||
+        off_midi + 32 > size || off_vh + 32 > size || off_vb + 32 > size ||
+        off_vs + 4 > size ||
+        (size_t)base + (size_t)nrec * (size_t)size > n) {
+        free(d);
+        return -1;
+    }
+    Songs = calloc(128, sizeof *Songs);
+    for (int ri = 0; ri < nrec; ri++) {
+        const uint8_t *r = d + base + (size_t)ri * (size_t)size;
+        char mid[33] = {0}, vh[33] = {0}, vb[33] = {0};
+        memcpy(mid, r + off_midi, 32);
+        memcpy(vh,  r + off_vh,  32);
+        memcpy(vb,  r + off_vb,  32);
+        float vs;
+        memcpy(&vs, r + off_vs, 4);
+        size_t ml = strlen(mid);
+        if (ml < 5 || strcmp(mid + ml - 4, ".mid") != 0) continue;
         int dup = 0;
         for (int i = 0; i < NSongs; i++)
-            if (!strcmp(Songs[i].mid, col[1])) { dup = 1; break; }
+            if (!strcmp(Songs[i].mid, mid)) { dup = 1; break; }
         if (dup || NSongs >= 128) continue;
         song_t *s = &Songs[NSongs++];
-        snprintf(s->mid, sizeof s->mid, "%s", col[1]);
-        snprintf(s->hd,  sizeof s->hd,  "%s", col[2]);
-        snprintf(s->bd,  sizeof s->bd,  "%s", col[3]);
-        snprintf(s->name, sizeof s->name, "%.*s", (int)(ml - 4), col[1]);
-        s->songvol = atoi(col[6]);
-        if (s->songvol < 1 || s->songvol > 127) s->songvol = 44;
+        snprintf(s->mid, sizeof s->mid, "%s", mid);
+        snprintf(s->hd,  sizeof s->hd,  "%s", vh);
+        snprintf(s->bd,  sizeof s->bd,  "%s", vb);
+        snprintf(s->name, sizeof s->name, "%.*s", (int)(ml - 4), mid);
+        s->songvol = (int)(127.0 * (double)vs);   /* the game's float trunc */
+        if (s->songvol > 126) s->songvol = 126;
+        if (s->songvol < 1) s->songvol = 44;
     }
-    free(txt);
+    free(d);
     qsort(Songs, NSongs, sizeof *Songs, song_cmp);
     return NSongs > 0 ? 0 : -1;
 }
@@ -239,12 +274,6 @@ typedef struct { double tick, sample, spt; } tseg_t;
 typedef struct { float lmin, lmax, rmin, rmax; uint8_t clip; } wcol_t;
 #define WCOL_SAMPLES AE3_TICK_SAMPLES
 #define WCOL_N 4096
-
-/* ---- voice snapshot ----------------------------------------------------- */
-typedef struct {
-    uint8_t in_use, active, released, ch, key;
-    int32_t env;
-} vsnap_t;
 
 /* ---- player state (audio-callback side guarded by mx) ------------------- */
 static struct {
@@ -259,7 +288,7 @@ static struct {
     int songvol, authored, loop_on, exact, rev_depth, gaussian;
     /* snapshot written each callback */
     uint64_t pos;
-    vsnap_t  vs[AE3_NVOICES];
+    ae3_voice_state vs[AE3_NVOICES];
     ae3_stats st;
     uint64_t seg_tick, tick_offset;
     double   seg_sample, spt;
@@ -463,17 +492,16 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
         P.peak_l = fmaxf(pl, P.peak_l * 0.86f);
         P.peak_r = fmaxf(pr, P.peak_r * 0.86f);
         if (ae3_synth_done(P.s)) { P.playing = 0; P.finished = 1; }
-        for (int i = 0; i < AE3_NVOICES; i++) {
-            const ae3_voice *v = &P.s->voices[i];
-            P.vs[i] = (vsnap_t){ v->in_use, v->active, v->released,
-                                 v->ch, v->key, v->env.level };
-        }
+        for (int i = 0; i < AE3_NVOICES; i++)
+            ae3_synth_voice(P.s, i, &P.vs[i]);
         ae3_synth_get_stats(P.s, &P.st);
-        P.pos = P.s->pos;
-        P.seg_tick = P.s->seq.seg_tick;
-        P.seg_sample = P.s->seq.seg_sample;
-        P.spt = P.s->seq.spt;
-        P.tick_offset = P.s->tick_offset;
+        P.pos = ae3_synth_pos(P.s);
+        ae3_clock ck;
+        ae3_synth_clock(P.s, &ck);
+        P.seg_tick = ck.seg_tick;
+        P.seg_sample = ck.seg_sample;
+        P.spt = ck.spt;
+        P.tick_offset = ck.tick_offset;
     }
     SDL_UnlockMutex(P.mx);
 }
@@ -513,26 +541,29 @@ static void build_timeline_locked(void)
     free(P.tmap);  P.tmap = NULL;  P.ntmap = 0;
     P.len_samp = 0; P.loop_s0 = P.loop_s1 = -1;
     P.key_lo = 127; P.key_hi = 0;
-    if (!P.s || !P.s->have_seq) return;
+    int nev = P.s ? ae3_synth_seq_events(P.s) : 0;
+    if (nev <= 0) return;
 
-    const ae3_seq *q = &P.s->seq;
-    P.notes = malloc((size_t)(q->nev + 1) * sizeof *P.notes);
-    P.tmap  = malloc((size_t)(q->nev + 2) * sizeof *P.tmap);
-    double spt = (double)AE3_RATE * 500000.0 / (1e6 * q->ppqn);
+    uint16_t ppqn = ae3_synth_seq_ppqn(P.s);
+    P.notes = malloc((size_t)(nev + 1) * sizeof *P.notes);
+    P.tmap  = malloc((size_t)(nev + 2) * sizeof *P.tmap);
+    double spt = (double)AE3_RATE * 500000.0 / (1e6 * ppqn);
     double seg_s = 0; uint32_t seg_t = 0;
     P.tmap[P.ntmap++] = (tseg_t){ 0, 0, spt };
-    int *open = malloc((size_t)q->nev * sizeof *open);
+    int *open = malloc((size_t)nev * sizeof *open);
     int nopen = 0;
     double last = 0;
 
-    for (int i = 0; i < q->nev; i++) {
-        const ae3_event *e = &q->ev[i];
+    for (int i = 0; i < nev; i++) {
+        ae3_seq_event ev;
+        ae3_synth_seq_event(P.s, i, &ev);
+        const ae3_seq_event *e = &ev;
         double ts = seg_s + (double)(e->tick - seg_t) * spt;
         if (ts > last) last = ts;
         switch (e->kind) {
         case AE3_EV_TEMPO:
             seg_s = ts; seg_t = e->tick;
-            spt = (double)AE3_RATE * (double)e->uspqn / (1e6 * q->ppqn);
+            spt = (double)AE3_RATE * (double)e->uspqn / (1e6 * ppqn);
             P.tmap[P.ntmap++] = (tseg_t){ (double)e->tick, ts, spt };
             break;
         case AE3_EV_LOOP_START: P.loop_s0 = ts; break;
@@ -616,7 +647,7 @@ static int load_song(int idx)
     int rc = reload_locked();
     build_timeline_locked();
     if (rc == 0) {
-        P.ppqn = P.s->seq.ppqn;
+        P.ppqn = ae3_synth_seq_ppqn(P.s);
         for (int i = 0; i < P.ntmap; i++)     /* initial tempo, for BPM display */
             if (P.tmap[i].tick <= 0) P.spt = P.tmap[i].spt;
     }
@@ -638,13 +669,15 @@ static void seek_to(double target)
     int was = P.playing || P.finished;
     if (reload_locked() == 0) {
         float buf[1024 * 2];
-        while ((double)P.s->pos < target)
+        while ((double)ae3_synth_pos(P.s) < target)
             if (ae3_synth_render(P.s, buf, 1024) <= 0) break;
-        P.pos = P.s->pos;
-        P.seg_tick = P.s->seq.seg_tick;
-        P.seg_sample = P.s->seq.seg_sample;
-        P.spt = P.s->seq.spt;
-        P.tick_offset = P.s->tick_offset;
+        P.pos = ae3_synth_pos(P.s);
+        ae3_clock ck;
+        ae3_synth_clock(P.s, &ck);
+        P.seg_tick = ck.seg_tick;
+        P.seg_sample = ck.seg_sample;
+        P.spt = ck.spt;
+        P.tick_offset = ck.tick_offset;
         P.playing = was;
     }
     SDL_UnlockMutex(P.mx);
@@ -712,10 +745,11 @@ static void draw_sidebar(void)
 
 int main(int argc, char **argv)
 {
-    int selftest = 0, secs = 5, autoplay = 0;
+    int selftest = 0, secs = 5, autoplay = 0, listsongs = 0;
     const char *want = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) selftest = 1;
+        else if (!strcmp(argv[i], "--songs")) listsongs = 1;   /* dump table, exit */
         else if (!strcmp(argv[i], "--play")) autoplay = 1;
         else if (!strcmp(argv[i], "--drop")) DropOpen = 1;   /* screenshot/debug */
         else if (!strcmp(argv[i], "--helpshow")) HelpOpen = 1;   /* screenshot/debug */
@@ -725,7 +759,8 @@ int main(int argc, char **argv)
     }
 
     font_init();
-    if (SDL_Init(selftest ? 0 : (SDL_INIT_VIDEO | SDL_INIT_AUDIO)) != 0) {
+    if (SDL_Init((selftest || listsongs) ? 0
+                                         : (SDL_INIT_VIDEO | SDL_INIT_AUDIO)) != 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return 1;
     }
@@ -738,10 +773,19 @@ int main(int argc, char **argv)
     }
 
     char path[1200];
-    snprintf(path, sizeof path, "%sresearch/bgm_volume_scale.tsv", Root);
+    snprintf(path, sizeof path,
+             "%sextracted/databin/debug/us/static/exdb_sound/bgm_desc.exdb.exdb",
+             Root);
     if (load_song_table(path)) {
-        fprintf(stderr, "cannot read song table %s (pass the repo root as arg)\n", path);
+        fprintf(stderr, "cannot read mastering db %s (pass the repo root as arg)\n",
+                path);
         return 1;
+    }
+    if (listsongs) {            /* differ oracle: name, bank pair, authored vol */
+        for (int i = 0; i < NSongs; i++)
+            printf("%s\t%s\t%s\t%d\n",
+                   Songs[i].name, Songs[i].hd, Songs[i].bd, Songs[i].songvol);
+        return 0;
     }
     snprintf(path, sizeof path, "%sextracted/irx/sg2iopm1.irx", Root);
     P.irx = read_file(path, &P.irxn);
@@ -960,7 +1004,7 @@ int main(int argc, char **argv)
         SDL_LockMutex(P.mx);
         uint64_t pos = P.pos, seg_t = P.seg_tick, toff = P.tick_offset;
         double seg_s = P.seg_sample, spt = P.spt;
-        vsnap_t vs[AE3_NVOICES];
+        ae3_voice_state vs[AE3_NVOICES];
         memcpy(vs, P.vs, sizeof vs);
         ae3_stats st = P.st;
         int playing = P.playing, finished = P.finished;

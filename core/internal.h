@@ -96,10 +96,8 @@ bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4], int32_t *out);
  * the slot. The 3-tick grace covers the attack starting at ENVX 0; the corpus' max
  * attack shift (17) reaches level >= 4 within 64 samples, so no real tone is still
  * below 2 when its first poll lands (a freed-while-rising voice would keep playing
- * unowned until its slot is regranted -- unreachable here, counted if it ever fires). */
-#define AE3_NVOICES      48
-#define AE3_TICK_HZ      60                        /* NTSC; PAL boots with 50 */
-#define AE3_TICK_SAMPLES (AE3_RATE / AE3_TICK_HZ)  /* 800 */
+ * unowned until its slot is regranted -- unreachable here, counted if it ever fires).
+ * AE3_NVOICES / AE3_TICK_* live in the public header. */
 
 /* SPU2 envelope, clocked per output sample (ENV_HZ == AE3_RATE). Level 0..0x7FFF is a
  * straight amplitude multiplier -- the whole point of the native synth (no dB shapes). */
@@ -235,13 +233,8 @@ uint16_t ae3__pitch_reg(ae3_synth *s, int note, int root, int fine, int bend_msb
 
 /* ---- sequence ---------------------------------------------------------- */
 
-/* The LOOP/HOOK kinds are CCs the game's SMF walker consumes (FUN_00402108) --
- * classified at parse time (AFTER the event-stream hash, which covers the raw
- * stream) and never dispatched into the driver's channel state, like hardware.
- * LOOP_START = CC99 v20, LOOP_END = CC99 v30, LOOP_COUNT = CC102, HOOK = CC90. */
-enum { AE3_EV_CH, AE3_EV_TEMPO, AE3_EV_END,
-       AE3_EV_LOOP_START, AE3_EV_LOOP_END, AE3_EV_LOOP_COUNT, AE3_EV_HOOK };
-
+/* Event record; kinds are the public AE3_EV_* (classification happens at parse
+ * time, AFTER the event-stream hash -- the hash covers the raw stream). */
 typedef struct {
     uint32_t tick;
     uint8_t  kind;

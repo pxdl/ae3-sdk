@@ -1,6 +1,7 @@
 # harness/ — native dev harnesses
 
-Both consume the core directly (white-box: they include `internal.h`).
+wavdump is white-box (includes `internal.h` for its trace hooks); bgmplay
+consumes only the public API in `ae3synth.h` and is its reference consumer.
 
 ## wavdump — headless render / inspect
 
@@ -23,9 +24,10 @@ make bgmplay && ./bgmplay [REPO_ROOT] [--song NAME] [--play]
 ```
 
 Real-time playback with piano roll, the 48-slot voice pool, waveform strip,
-help overlay, and 3-mode WAV export. Reads the song table and IRX donors from
-the research-repo layout it is launched from (it ships no data); W1 migrates it
-onto the public introspection API.
+help overlay, and 3-mode WAV export. Song list, bank pairing and authored
+per-song volumes come from the game's own mastering DB (`bgm_desc.exdb`,
+extracted tree under REPO_ROOT; it ships no data). `--songs` dumps that table
+for diffing against the `ae3 songvol` oracle.
 
 Keys: SPACE play/pause · ENTER play selected · ↑/↓ select · L loop · T
 exact/tick clock · R reverb · ,/. depth · -/= volume · A authored volume ·

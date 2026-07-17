@@ -719,3 +719,45 @@ void ae3_synth_get_stats(const ae3_synth *s, ae3_stats *out)
 {
     *out = s->st;
 }
+
+/* ---- playback introspection (ae3synth.h) -------------------------------- */
+
+uint64_t ae3_synth_pos(const ae3_synth *s)
+{
+    return s->pos;
+}
+
+bool ae3_synth_voice(const ae3_synth *s, int i, ae3_voice_state *out)
+{
+    if (i < 0 || i >= AE3_NVOICES)
+        return false;
+    const ae3_voice *v = &s->voices[i];
+    *out = (ae3_voice_state){ v->in_use, v->active, v->released,
+                              v->ch, v->key, v->env.level };
+    return true;
+}
+
+int ae3_synth_seq_events(const ae3_synth *s)
+{
+    return s->have_seq ? s->seq.nev : 0;
+}
+
+bool ae3_synth_seq_event(const ae3_synth *s, int i, ae3_seq_event *out)
+{
+    if (!s->have_seq || i < 0 || i >= s->seq.nev)
+        return false;
+    const ae3_event *e = &s->seq.ev[i];
+    *out = (ae3_seq_event){ e->tick, e->kind, e->status, e->a, e->b, e->uspqn };
+    return true;
+}
+
+uint16_t ae3_synth_seq_ppqn(const ae3_synth *s)
+{
+    return s->have_seq ? s->seq.ppqn : 0;
+}
+
+void ae3_synth_clock(const ae3_synth *s, ae3_clock *out)
+{
+    *out = (ae3_clock){ s->seq.seg_tick, s->seq.seg_sample, s->seq.spt,
+                        s->tick_offset };
+}
