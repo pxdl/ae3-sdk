@@ -1,0 +1,20 @@
+# build outputs
+*.o
+*.a
+core/*.d
+harness/wavdump
+harness/bgmplay
+wasm/dist/
+extract-web/dist/
+node_modules/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+dist/
+build/
+
+# editors / os
+.DS_Store
