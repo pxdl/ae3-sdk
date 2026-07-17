@@ -1,0 +1,18 @@
+name: wasm
+on:
+  push:
+    paths: ["core/**", "wasm/**", "tests/**", ".github/workflows/ci-wasm.yml"]
+  pull_request:
+    paths: ["core/**", "wasm/**", "tests/**", ".github/workflows/ci-wasm.yml"]
+  workflow_dispatch:
+
+jobs:
+  build-and-vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+      - name: Build standalone wasm
+        run: make -C wasm
+      - name: Golden-vector gate (WASM vs the native golden hashes)
+        run: node wasm/test/run_vectors.mjs

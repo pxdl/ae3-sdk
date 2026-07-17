@@ -1,0 +1,15 @@
+{
+  "name": "@ae3/synth",
+  "version": "0.1.0",
+  "description": "AE3 BGM synth core (standalone WASM) + thin environment-agnostic binding",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./js/ae3synth.mjs",
+    "./ae3synth.wasm": "./dist/ae3synth.wasm"
+  },
+  "files": [
+    "js/",
+    "dist/ae3synth.wasm"
+  ]
+}

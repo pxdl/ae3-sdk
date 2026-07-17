@@ -12,7 +12,9 @@ model/animation and FMV tooling:
   `bgmplay` (SDL2 player/visualizer).
 - `tools/` — Python toolkit (`ae3tools`): DATA.BIN (VFI) extraction, Exdb table
   dumping, I3D model/animation conversion, FMV and subtitle tools.
-- `wasm/` — WebAssembly build of `core/` + JS binding (arrives in W2).
+- `wasm/` — standalone WebAssembly build of `core/` + the `@ae3/synth` JS
+  binding, render-identical to native (gated: synthetic vectors in CI, full
+  corpus privately).
 - `extract-web/` — TypeScript browser-side extraction package (arrives in W3).
 - `docs/formats/` — canonical format specifications (DATA.BIN/VFI, BGM, Exdb…)
   that every implementation here cites.
