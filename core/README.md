@@ -19,7 +19,7 @@ being bit-identical across compilers and architectures.
 
 | file | role |
 |---|---|
-| `ae3synth.h` | public API: load bank/seq/pitch-IRX, transport, render f32 stereo @ 48 kHz |
+| `ae3synth.h` | public API: load bank/seq/pitch-IRX, transport, render f32 stereo @ 48 kHz, playback/sequence introspection for visualizers |
 | `bank.c` | Sony "Jam" `.hd` bank parser (hard errors on any layout violation) |
 | `seq.c` | format-0 MIDI parser + sample-accurate tempo clock |
 | `voice.c` | streaming PS-ADPCM decoder + gaussian resampler + live SPU2 ADSR |
@@ -28,7 +28,7 @@ being bit-identical across compilers and architectures.
 | `vol.c` | the driver's linear volume chain + the SPU2 pan table (rebuilt from its rule) |
 | `reverb.c` | the SPU2 reverb, streaming: half-band FIR down/up + 24 kHz network; preset from the user's `libsd.irx` |
 | `synth.c` | instance, note-on tone scan, the 48-slot voice pool, CC dispatch, loop markers, both event clocks, mixer + wet bus |
-| `internal.h` | shared internals (harnesses may include; external consumers must not) |
+| `internal.h` | shared internals (wavdump's white-box hooks only; every other consumer — bgmplay included — uses `ae3synth.h`) |
 
 **No game data is embedded** — banks, sequences, the pitch table and the reverb
 preset are all read at runtime from the user's own disc. See `../NOTICE.md` for
