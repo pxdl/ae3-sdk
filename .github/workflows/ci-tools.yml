@@ -1,0 +1,31 @@
+name: tools
+on:
+  push:
+    paths: ["tools/**", ".github/workflows/ci-tools.yml"]
+  pull_request:
+    paths: ["tools/**", ".github/workflows/ci-tools.yml"]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package (with image extras)
+        run: pip install ./tools[images]
+      - name: Import every module + CLI smoke
+        run: |
+          python - <<'EOF'
+          from ae3tools import cli
+          import importlib
+          for sub, (mod, _) in cli.COMMANDS.items():
+              importlib.import_module(f"ae3tools.{mod}")
+          print(f"{len(cli.COMMANDS)} modules import cleanly")
+          EOF
+          ae3 --help
+          ae3 vfiparse --help
+          ae3 extract --help
+          ae3 songvol --help
