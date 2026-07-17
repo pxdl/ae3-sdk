@@ -1,0 +1,27 @@
+name: extract
+on:
+  push:
+    paths: ["extract-web/**", ".github/workflows/ci-extract.yml"]
+  pull_request:
+    paths: ["extract-web/**", ".github/workflows/ci-extract.yml"]
+  workflow_dispatch:
+
+jobs:
+  typecheck-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extract-web/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: extract-web
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: extract-web
+      - name: Synthetic-fixture tests
+        run: npm test
+        working-directory: extract-web

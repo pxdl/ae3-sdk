@@ -2,7 +2,8 @@
 """Extract from DATA.BIN. Full pipeline: VFI -> deflate (.sz) -> PCK -> assets.
 
   DATA.BIN            VFI container, 3994 files, real directory tree
-    └─ *.sz           [u32 decompressed_size][RAW DEFLATE]   (zlib wbits=-15)
+    └─ *.sz           [u32 decompressed_size][RAW DEFLATE][Adler-32 BE]  (zlib wbits=-15
+                      inflates it; the trailer is ignored -- see DATA_BIN.md §2)
          └─ *.pck     PCK container -- every member declares a TYPE and ATTRIBUTES
               ├─ I3D_   3D model / animation / collision
               └─ TIM2   texture    (standard PS2 format, documented)

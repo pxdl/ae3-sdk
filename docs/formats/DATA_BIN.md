@@ -14,7 +14,7 @@ and textures are located.
 
 ```
 DATA.BIN                VFI container — 3994 files, 254 dirs, real directory tree
-  └─ *.sz               [u32 decompressed_size][RAW DEFLATE]   zlib.decompress(d, -15)
+  └─ *.sz               [u32 decompressed_size][raw deflate][Adler-32 BE]   (§2)
        └─ *.pck         PCK container
             ├─ I3D_BIN    3D model   (see docs/formats/I3D.md)
             └─ TIM2       texture    (standard PS2 format)
@@ -94,15 +94,25 @@ where the entry table begins.
 
 ---
 
-## 2. `.sz` — raw DEFLATE
+## 2. `.sz` — DEFLATE with an Adler-32 trailer
 
 ```
-[u32 decompressed_size][raw deflate stream]   →   zlib.decompress(blob[4:], -15)
+[u32 decompressed_size][raw deflate stream][u32 Adler-32 of the payload, BIG-endian]
 ```
 
-The `-15` window-bits value selects a raw stream with no zlib wrapper. Verified: **400 / 400**
-sampled files decompress to their exact declared size with 0 failures, and each decompressed
-blob begins with `PCK\0`. There are 1706 `.sz` files in the container.
+This is exactly a **zlib stream with its 2-byte header stripped**: deflate body followed by
+the standard big-endian Adler-32 checksum of the uncompressed data. Verified corpus-wide
+(2026-07-17): **1706 / 1706** `.sz` files in the container inflate to their exact declared
+size AND carry the exact Adler-32 trailer, 0 exceptions.
+
+Two equivalent ways to read one:
+
+- `zlib.decompress(blob[4:], -15)` — raw-mode inflate; zlib stops at the end of the deflate
+  stream and silently ignores the 4 trailing checksum bytes (how the trailer went unnoticed
+  until the web port).
+- Prepend a valid zlib header (e.g. `78 9C`) to `blob[4:]` and inflate as a zlib stream —
+  required for the WHATWG `DecompressionStream`, whose `"deflate-raw"` mode *rejects*
+  trailing bytes as junk; `"deflate"` mode consumes the trailer and verifies the checksum.
 
 ---
 

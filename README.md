@@ -15,7 +15,10 @@ model/animation and FMV tooling:
 - `wasm/` — standalone WebAssembly build of `core/` + the `@ae3/synth` JS
   binding, render-identical to native (gated: synthetic vectors in CI, full
   corpus privately).
-- `extract-web/` — TypeScript browser-side extraction package (arrives in W3).
+- `extract-web/` — TypeScript browser-side extraction (`@ae3/extract`):
+  ISO9660 → DATA.BIN (VFI) → deflate/PCK → assets → OPFS cache, plus the Exdb
+  (BgmDesc) parser. Byte-identical to the Python extractor (gated: synthetic
+  fixtures in CI, full corpus privately).
 - `docs/formats/` — canonical format specifications (DATA.BIN/VFI, BGM, Exdb…)
   that every implementation here cites.
 

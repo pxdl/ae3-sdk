@@ -1,0 +1,17 @@
+{
+  "name": "@ae3/extract",
+  "version": "0.1.0",
+  "description": "Client-side asset extraction for the AE3 BGM player: ISO9660 -> DATA.BIN (VFI) -> deflate/PCK -> assets -> OPFS cache",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "node --test test/extract.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

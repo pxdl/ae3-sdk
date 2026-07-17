@@ -6,9 +6,12 @@ from the user's own disc, with their VFI paths inside `DATA.BIN`. Pinned from a
 3,994 VFI entries total.
 
 Chain: **ISO file → ISO9660 filesystem → `DATA.BIN` → VFI archive → assets.**
-`.sz` entries are raw deflate (browser: `DecompressionStream('deflate-raw')`);
-`.pck` entries are the PCK sub-container (see DATA_BIN.md). Both expansions are
-loss-free and verified (400/400 `.sz` inflate to their exact declared size).
+`.sz` entries are `[u32 size][raw deflate][Adler-32 BE]` — a zlib stream minus
+its 2-byte header; browsers must reconstruct that header and inflate with
+`DecompressionStream('deflate')`, since `'deflate-raw'` rejects the checksum
+trailer as junk (DATA_BIN.md §2). `.pck` entries are the PCK sub-container.
+Both expansions are loss-free and verified (1706/1706 `.sz` inflate to their
+exact declared size with exact trailers).
 
 ## 1. Instrument banks + sequences (played directly)
 
