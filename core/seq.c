@@ -1,6 +1,6 @@
 /* seq.c -- MIDI (format 0) parser + the sample-accurate tempo clock.
  *
- * Event walking mirrors tools/bgm.py _parse_track byte for byte (including its running-
+ * Event walking mirrors the offline reference parser byte for byte (including its running-
  * status behavior), then collapses to what the synth dispatches: channel events, tempo
  * (FF 51), end-of-track (FF 2F). Other meta/sysex are parsed past and counted.
  *

@@ -1,7 +1,7 @@
 /* pitch.c -- the SPU2 pitch register, exactly as the driver's IOP module computes it.
  *
- * Ground truth: ev_set_pitch in irx/3.0/sg2iopm1.irx (not stripped; disassembled with
- * tools/irxdis.py, re-verified 2026-07-16). The math below mirrors that code:
+ * Ground truth: ev_set_pitch in irx/3.0/sg2iopm1.irx (not stripped; disassembled and
+ * re-verified). The math below mirrors that code:
  *   d = |note - root|; q = d / 12 (truncating); R = d % 12
  *   idx = (note >= root ? R*16 : (12-R)*16) + 208 + fine + ((bendMSB - 64) * range >> 2)
  *   p   = note >= root ? pitch_tbl[idx] << q : pitch_tbl[idx] >> (q + 1)

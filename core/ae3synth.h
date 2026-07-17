@@ -1,8 +1,7 @@
 /* ae3synth.h -- Ape Escape 3 native SPU2 BGM synth: public API.
  *
- * Pure, engine-agnostic C core (same discipline as the physics src/core/: no engine
- * dependency, builds and tests headless). Design + ground truth: research/SYNTH_HANDOFF.md,
- * research/BGM.md. Reference oracle: tools/bgm.py.
+ * Pure, engine-agnostic C core: no engine dependency, builds and tests headless.
+ * Format + driver ground truth: docs/formats/BGM.md.
  *
  * LEGAL: consumes Sony's bank/sequence data at runtime; never embeds or redistributes it.
  */
@@ -37,12 +36,12 @@ typedef struct {
     uint64_t end_sample;      /* end-of-track position on the 48 kHz clock,
                                  loop markers ignored (single play-through) */
     /* sequencer-consumed CCs (the game's SMF walker FUN_00402108 eats these; they
-     * never reach the driver's channel state -- decomp/functions_bgm/cc/NOTES.md) */
+     * never reach the driver's channel state) */
     uint32_t loop_starts;     /* CC99 val 20 markers seen at parse */
     uint32_t loop_ends;       /* CC99 val 30 markers seen at parse */
     uint32_t loop_sets;       /* CC102 loop-count events (corpus: never) */
     uint32_t hooks;           /* CC90 game-callback events (corpus: never) */
-    /* FNV-1a 64 over the event stream, mirrored by synth/check.py against tools/bgm.py */
+    /* FNV-1a 64 over the event stream, mirrored by the corpus gates */
     uint64_t hash_ch, hash_tempo;
     /* playback (accumulated while rendering) */
     uint32_t voices_started;
@@ -112,16 +111,15 @@ int ae3_synth_load_reverb_irx(ae3_synth *s, const void *libsd, size_t libsd_len)
 /* Resampler kernel A/B. on=true (default) = the SPU2's 4-tap gaussian (psx-spx
  * table) -- the hardware behavior: darker treble, and below-root notes genuinely
  * image (the s_9 percussion "frying" is authentic). on=false = a catmull-rom
- * 4-tap kernel: brighter/cleaner, NOT what the console does -- the "bright is
- * better" listening preference (memory project_ae3_bgm_findings) offered against
- * the native faithful default, per SYNTH_HANDOFF §8. Applies to live voices. */
+ * 4-tap kernel: brighter/cleaner, NOT what the console does -- a listening preference
+ * offered against the native faithful default. Applies to live voices. */
 void ae3_synth_gaussian(ae3_synth *s, bool on);
 
 /* Reverb depth 0..127 (EVOL = depth*32767/127, EE 0x3f67c8). Boot/default = 30;
  * 0 disables the bus entirely (exact dry path). A knob for A/B only -- the game
  * never moves it. NOTE: whether the EVOL register scales /2 like the voice-volume
- * format (which would make the return 2x hotter than bgm.py's 1.15 reading) is
- * unresolved until the PCSX2 in-game dump; this follows bgm.py, the current oracle. */
+ * format (which would make the return 2x hotter than the oracle's 1.15 reading) is
+ * unresolved until a hardware capture; this follows the current oracle. */
 void ae3_synth_reverb_depth(ae3_synth *s, int depth);
 
 /* Direct channel events, same paths the sequencer dispatches into. Used by test
@@ -140,7 +138,7 @@ void ae3_synth_program(ae3_synth *s, int ch, int prog);
 void ae3_synth_song_volume(ae3_synth *s, int l, int r);
 
 /* Song looping, the sequencer's own mechanism (pinned M7 from the game's SMF walker,
- * FUN_00402108 / FUN_00400e80 -- decomp/functions_bgm/cc/NOTES.md): CC99 val 20 marks
+ * FUN_00402108 / FUN_00400e80): CC99 val 20 marks
  * the loop start, CC99 val 30 the loop end; both are consumed by the walker and never
  * reach the driver. At a loop end the count is decremented (0x7f = never) and while it
  * stays positive playback jumps back, deltas preserved across the seam. 64 of the 68

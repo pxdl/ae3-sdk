@@ -6,7 +6,7 @@
 
 /* ---- bank ------------------------------------------------------------- */
 
-/* Tone record, 16 bytes in the .hd (research/BGM.md; layout table in SYNTH_HANDOFF.md §3).
+/* Tone record, 16 bytes in the .hd (docs/formats/BGM.md).
  * Byte 10 is read by nothing in the game and is not stored. */
 typedef struct {
     uint8_t  lo, hi;      /* key window (drums: key = position, bytes 0/1 are zero) */
@@ -80,7 +80,7 @@ bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4], int32_t *out);
 
 /* ---- voice slots: the driver's allocator (sg2slotctrl.c) -------------------
  *
- * Ground truth (decomp/functions_bgm/slot/, raw MIPS verified 2026-07-16):
+ * Ground truth (raw MIPS of the game's slot controller, verified):
  * 48 slots (EE 0x0074B700, stride 0xE8), 1:1 with the SPU2's 48 hardware voices.
  * FUN_004009c8 grants the first free slot scanning ROUND-ROBIN from a persistent
  * cursor (cursor = granted+1 mod 48; the core-range args FUN_00400b58 computes are
@@ -118,7 +118,7 @@ void    ae3_env_keyoff(ae3_env *e);
 int32_t ae3_env_tick(ae3_env *e);
 bool    ae3_env_dead(const ae3_env *e);   /* the driver's ENVX<2 reclaim condition */
 /* cycles for one phase run start->target; shared with the live stepper, mirrored by
- * check.py against bgm._phase_time */
+ * the corpus gates against the offline reference */
 uint64_t ae3__env_phase_cycles(int shift, int step, bool exp, bool rising,
                                int32_t level, int32_t target);
 
@@ -164,27 +164,27 @@ void    ae3__voice_regs(int svl, int svr, int32_t vvol, int vel, int cpan, int t
 
 /* ---- reverb bus (reverb.c) -------------------------------------------------
  *
- * The SPU2's fixed reverb, ported from tools/spu2rev.c (psx-spx formula) into a
+ * The SPU2's fixed reverb, ported from the project's offline oracle (psx-spx formula) into a
  * STREAMING per-sample form: voices with tone flag 0x80 sum into a 16-bit-saturated
  * wet bus; the bus is decimated 48k->24k through the hardware's 39-tap half-band FIR,
  * runs one feedback-network step per 24 kHz frame, and the return is interpolated
  * back to 48k through the same FIR (x2, zero-stuffed). The preset (STUDIO_C, boot-
  * pinned) is read out of libsd.irx at runtime, never embedded.
  *
- * GRID + LATENCY (pinned so check.py can diff against the offline oracle EXACTLY):
+ * GRID + LATENCY (pinned so the corpus gates can diff against the offline oracle EXACTLY):
  * the offline spu2rev applies both FIRs zero-phase (non-causal, +-19 taps); real time
  * cannot look ahead, so here they are causal -- the network steps on ODD 48 kHz
  * frames over the last 39 wet samples, the return is stuffed on odd frames likewise.
  * With identical FP operation order (and -ffp-contract=off, already pinned) the
  * output equals the offline render delayed by EXACTLY 19+19 = 38 samples (0.79 ms --
- * the latency the hardware's own causal FIRs have). check.py feeds the oracle a
+ * the latency the hardware's own causal FIRs have). The corpus gate feeds the oracle a
  * 38-sample-delayed wet stem and requires bitwise equality. Which parity the console
  * decimates on (odd vs even, a +-1-sample return shift) is unknowable short of a
  * hardware capture and inaudible; odd is what lands on the offline grid. */
 #define AE3_REV_FIRTAPS 39
 #define AE3_REV_NCOEF   32
 /* Feed the reverb this much silence after the song so the tail decays instead of
- * being chopped (STUDIO_C RT60 ~2 s). Ours, matching bgm.py REV_TAIL_S -- the
+ * being chopped (STUDIO_C RT60 ~2 s). Ours, matching the offline reference -- the
  * console just rings until the next song. */
 #define AE3_REV_TAIL_SAMPLES (4 * AE3_RATE)
 
@@ -214,8 +214,8 @@ void ae3__rev_sample(ae3_rev *r, int16_t wl, int16_t wr, double *outl, double *o
 
 /* Full-mix trace hook for the test harness (wavdump --stems); NULL in normal use.
  * Fires per mixed block, reverb path only: dry/wet are the saturated s16 buses,
- * rev is the combined dry+EVOL*return quantized EXACTLY as tools/spu2rev.c writes
- * its output ((short)(l * 32767.0), pre-MVOL) so check.py can diff the two bitwise. */
+ * rev is the combined dry+EVOL*return quantized EXACTLY as the offline oracle writes
+ * its output ((short)(l * 32767.0), pre-MVOL) so the gates can diff the two bitwise. */
 typedef void (*ae3_mix_tap)(void *user, const int16_t *dry, const int16_t *wet,
                             const int16_t *rev, int nframes);
 
@@ -251,8 +251,8 @@ typedef struct {
 
 /* Event-dispatch trace hook (wavdump --eventdump); NULL in normal use. Fires once
  * per dispatched sequence event with the dispatch sample and the event's index in
- * the parsed array (the index goes BACKWARDS across a loop-end jump) -- check.py's
- * walker mirror diffs the (pos, idx) stream exactly. */
+ * the parsed array (the index goes BACKWARDS across a loop-end jump) -- the corpus
+ * gates' walker mirror diffs the (pos, idx) stream exactly. */
 typedef void (*ae3_ev_trace)(void *user, uint64_t pos, int idx, const ae3_event *e);
 
 typedef struct {

@@ -1,10 +1,10 @@
 /* vol.c -- the driver's LINEAR volume chain and the SPU2 pan table.
  *
- * Everything here was read from the game ELF with Ghidra (2026-07-16, decompiles in
- * decomp/functions_bgm/vol/) -- no formula is inherited from bgm.py without a code read:
+ * Everything here was read from the game ELF with Ghidra -- no formula is
+ * inherited from the offline reference without a code read:
  *
  *   FUN_00400c00   per-voice VOLL/VOLR register math (disassembly verified word by
- *                  word); mirrored by ae3__voice_regs and, independently, check.py.
+ *                  word); mirrored by ae3__voice_regs and, independently, the corpus gates.
  *   FUN_003facb8   note-on: voice vol = CC7*CC11*prog[1]*tone[11] (FUN_00421a80
  *                  multiply chain) / 0x1F417F = 127^3 (FUN_00422d30); channel pan
  *                  clamp(1..127); tone pan >127 -> 127, ==0 -> 1.
@@ -23,8 +23,8 @@
  *
  * The pan table lives at EE 0x0069DD60 (u16 per entry, hi byte = left gain, lo =
  * right, both 0..127). It is a RULE, not arbitrary data, so it is rebuilt here the
- * same way bgm._pan_lut does (and check.py verifies all 128 entries against the ELF
- * bytes): one side pins at 127 while the other ramps by 2 to index 49 then by 1 to
+ * same way the offline reference does (the corpus gates verify all 128 entries
+ * against the ELF bytes): one side pins at 127 while the other ramps by 2 to index 49 then by 1 to
  * 63; 64 is special-cased at 120/120; 65..127 mirror 63..1. NOT constant power:
  * centre (120/120) carries 2.52 dB more total power than hard pan (127/0) -- the
  * game's mix leans on this, do not "fix" it. */

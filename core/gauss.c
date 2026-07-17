@@ -4,10 +4,10 @@
  * the psx-spx documentation (nocash / psx-spx.consoledev.net, "4-Point Gaussian
  * Interpolation"), which documents them as measured hardware behavior. They are
  * reproduced here as a description of what the hardware does -- the same stance
- * tools/spu2rev.c takes for the reverb FIR taps. Not derived from any GPL source.
+ * reverb.c takes for the FIR taps (see NOTICE.md). Not derived from any GPL source.
  *
  * Self-check (from the same doc): for every i, gauss[0x0FF-i] + gauss[0x1FF-i] +
- * gauss[0x100+i] + gauss[0x000+i] sums to 0x7F7F..0x7F81 (verified by check.py).
+ * gauss[0x100+i] + gauss[0x000+i] sums to 0x7F7F..0x7F81 (verified by the corpus gates).
  * Interpolation (i = pitch-counter bits 4-11):
  *   out  = (gauss[0x0FF-i] * oldest) >> 15    each product shifted individually,
  *   out += (gauss[0x1FF-i] * older)  >> 15    arithmetic shift (SAR)

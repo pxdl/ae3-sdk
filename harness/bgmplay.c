@@ -4,8 +4,8 @@
  * Same standing as wavdump: a test harness over the pure core (includes internal.h
  * to peek voice/sequencer state read-only; the core itself stays engine-agnostic).
  * Song list, bank pairing and AUTHORED per-song volumes come from the game's own
- * mastering table (research/bgm_volume_scale.tsv -- trunc(127 x volume_scale) at
- * slider 1.0), so orphan sequences resolve to the bank the game's cue table names.
+ * mastering table (a TSV derived from the game's own bgm_desc database, read at
+ * runtime, never shipped -- trunc(127 x volume_scale) at slider 1.0), so orphan sequences resolve to the bank the game's cue table names.
  *
  * Audio: SDL callback pulls ae3_synth_render under a mutex (the core renders ~460x
  * real time, so the lock is held microseconds per block). The GUI thread takes the
@@ -298,8 +298,8 @@ static int export_thread(void *arg)
     return 0;
 }
 
-/* Export a song through wavdump -- the exact pipeline the listening set under
- * extracted/synth/ was rendered with. songvol/rev/exact parameterized so the
+/* Export a song through wavdump -- the exact pipeline the reference listening set
+ * was rendered with. songvol/rev/exact parameterized so the
  * dropdown can offer current settings, the authored originals, or a looped
  * render (wavdump --loop N: the loop body plays N times total). */
 static void export_wav(int idx, int songvol, int rev_depth, int exact,
@@ -356,8 +356,7 @@ static void export_wav(int idx, int songvol, int rev_depth, int exact,
 /* the dropdown's three actions */
 static int DropOpen, LoopN = 2, HelpOpen;
 
-/* ---- help overlay: the console's quirks, from the reverse-engineering notes
- * (research/SYNTH_HANDOFF.md, decomp/functions_bgm/) -------------------------- */
+/* ---- help overlay: the console's quirks, from the reverse-engineering notes --- */
 static const struct { int head; const char *s; } HELP[] = {
 {1, "WHAT THIS IS"},
 {0, "A native re-implementation of the game's PS2 sound driver. It performs streaming ADPCM"},

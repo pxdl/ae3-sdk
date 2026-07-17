@@ -1,19 +1,19 @@
 /* reverb.c -- the SPU2's fixed reverb, streaming, per-sample.
  *
- * A port of tools/spu2rev.c (the offline oracle) into the live mixer. The algorithm
+ * A streaming port of the project's offline reverb oracle into the live mixer. The algorithm
  * is the psx-spx SPU reverb formula -- a per-sample feedback network at the half
  * rate 24000 Hz -- with the bus resampled 48k<->24k through the hardware's 39-tap
  * half-band FIR (taps from PCSX2 ReverbResample.cpp, reproduced as a description of
  * hardware behavior, credited; the network itself is written from psx-spx, not from
- * PCSX2's GPL code -- the project's clean-room stance, see SYNTH_HANDOFF §7).
+ * PCSX2's GPL code -- the project's clean-room stance, see NOTICE.md).
  *
  * NOTHING GAME-DERIVED IS BAKED IN: the preset coefficients are read out of Sony's
  * libsd.irx at runtime (ae3__load_libsd), exactly as bgm.load_reverb does.
  *
  * EXACTNESS CONTRACT with the offline oracle (see internal.h "GRID + LATENCY"):
- * every floating-point expression here keeps spu2rev.c's operand order, so with
+ * every floating-point expression here keeps the oracle's operand order, so with
  * -ffp-contract=off (Makefile-pinned) the doubles are bit-identical and the only
- * difference is the causal FIRs' fixed 38-sample delay. check.py leans on that.
+ * difference is the causal FIRs' fixed 38-sample delay. The corpus gates lean on that.
  * The return-path sum iterates oldest-to-newest like the oracle's k-ascending loop;
  * its FIR indices come out mirrored (k -> 38-k), which is the same tap value -- the
  * table is symmetric -- so the products and their order match bit for bit. */
@@ -31,7 +31,7 @@ static const double FIR[AE3_REV_FIRTAPS] = {
     10246, 0, -2960, 0, 1332, 0, -616, 0, 266, 0, -103, 0, 35, 0, -10, 0, 2, 0, -1,
 };
 
-/* Preset field order as libsd stores it (same enum as spu2rev.c). */
+/* Preset field order as libsd stores it (same enum as the oracle). */
 enum {
     dAPF1, dAPF2, vIIR, vCOMB1, vCOMB2, vCOMB3, vCOMB4, vWALL, vAPF1, vAPF2,
     mLSAME, mRSAME, mLCOMB1, mRCOMB1, mLCOMB2, mRCOMB2, dLSAME, dRSAME,
@@ -95,7 +95,7 @@ int ae3__load_libsd(ae3_synth *s, const uint8_t *d, size_t len)
             return ae3__fail(s, "libsd: preset tap %u does not fit area %u",
                              raw[i], units);
     /* the network reads below some taps (the "-1" slot, the APF delay); keep those
-     * subtractions non-negative (true of libsd's presets; spu2rev.c assumes it) */
+     * subtractions non-negative (true of libsd's presets; the oracle assumes it) */
     if (raw[mLAPF1] < raw[dAPF1] || raw[mRAPF1] < raw[dAPF1] ||
         raw[mLAPF2] < raw[dAPF2] || raw[mRAPF2] < raw[dAPF2] ||
         !raw[mLSAME] || !raw[mRSAME] || !raw[mLDIFF] || !raw[mRDIFF])
@@ -172,7 +172,7 @@ void ae3__rev_sample(ae3_rev *r, int16_t wl, int16_t wr, double *outl, double *o
         double inl = sl / (32768.0 * 32768.0);   /* /32768 FIR gain, /32768 s16 */
         double inr = sr / (32768.0 * 32768.0);
 
-        /* one network step at the reverb clock -- spu2rev.c's loop body verbatim
+        /* one network step at the reverb clock -- the oracle's loop body verbatim
          * ("-2" in psx-spx is 2 bytes = 1 slot; note the L/R swap on the
          * different-side source taps) */
         const double *v = r->v;

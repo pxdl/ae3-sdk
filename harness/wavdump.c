@@ -1,5 +1,5 @@
 /* wavdump -- headless harness: render a song to WAV, or dump parsed/decoded state
- * for synth/check.py to diff against tools/bgm.py (the reference oracle).
+ * for the private corpus gates to diff against the offline reference oracle.
  *
  * usage: wavdump [MODE] [--tail SEC] [--songvol 0..127] [--libsd PATH]
  *                [--rev-depth 0..127] [--stems PREFIX] [--tick-events]
@@ -12,8 +12,8 @@
  * extracted libsd.irx; without it renders are pure dry, bit-identical to pre-M6.
  * --rev-depth overrides the depth knob (0 = dry). --stems PREFIX (needs --libsd)
  * writes PREFIX.dry.raw / PREFIX.wet.raw (the saturated s16 buses) and
- * PREFIX.rev.raw (dry + EVOL*reverb quantized exactly as tools/spu2rev.c writes
- * its output) alongside the render, for check.py's bitwise oracle diff.
+ * PREFIX.rev.raw (dry + EVOL*reverb quantized exactly as the offline oracle writes
+ * its output) alongside the render, for the gates' bitwise oracle diff.
  * --tick-events dispatches events in the console's 60 Hz walker bursts (M7) instead
  * of exact sample positions (the default -- the user-settled dial: tick reads as
  * "notes late / emulator slowdown"; use tick for emulation-faithful output and
@@ -34,10 +34,10 @@
  *                        lifecycle: G(rant)/D(rop)/F(ree)/Z(ombie) lines + S totals
  *   --eventdump          render the song discarding audio, tracing every dispatched
  *                        event: EV lines (pos/index/kind) + an EVS totals line, for
- *                        check.py's independent SMF-walker mirror
+ *                        the corpus gates' independent SMF-walker mirror
  *   --tone P:K:V:ON[:TOT]  render one tone via the real voice path to -o OUT.wav
  * Default mode renders .hd+.bd+.mid to -o. Output is s16 stereo 48 kHz, the same
- * shape as bgm.py's WAVs. */
+ * shape as the offline reference's WAVs. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -114,7 +114,7 @@ static void dump(const ae3_synth *s, bool have_bank, bool have_seq)
                st->end_tick, (unsigned long long)st->end_sample,
                (unsigned long long)st->hash_ch, (unsigned long long)st->hash_tempo);
     }
-    if (s->rev.buf) {          /* preset as loaded, for check.py vs bgm.load_reverb */
+    if (s->rev.buf) {          /* preset as loaded, for the gates' reverb-preset diff */
         printf("REV units=%u depth=%d evol=%.17g raw=", s->rev.units, s->rev.depth,
                s->rev.evol);
         for (int i = 0; i < AE3_REV_NCOEF; i++)
@@ -123,7 +123,7 @@ static void dump(const ae3_synth *s, bool have_bank, bool have_seq)
     }
 }
 
-/* --slotdump: one line per slot event for check.py's independent policy mirror. */
+/* --slotdump: one line per slot event for the gates' independent policy mirror. */
 static void slot_trace_print(void *user, char ev, uint64_t pos, int slot,
                              int ch, int key)
 {
@@ -147,7 +147,7 @@ static void slot_dump(ae3_synth *s)
            st.peak_voices, st.slots_freed_live);
 }
 
-/* --eventdump: one line per dispatched event for check.py's SMF-walker mirror. */
+/* --eventdump: one line per dispatched event for the gates' SMF-walker mirror. */
 static void ev_trace_print(void *user, uint64_t pos, int idx, const ae3_event *e)
 {
     (void)user;
@@ -170,7 +170,7 @@ static void event_dump(ae3_synth *s)
            st.cc_lfo, st.cc_nrpn, st.cc6_shadow, st.cc6_rev_apply, st.cc_stub);
 }
 
-/* --stems: dry/wet buses + the spu2rev-quantized combine, straight to disk. */
+/* --stems: dry/wet buses + the oracle-quantized combine, straight to disk. */
 typedef struct { FILE *fd, *fw, *fr; } stems_files;
 
 static void stems_tap(void *user, const int16_t *dry, const int16_t *wet,
@@ -207,7 +207,7 @@ static int addr_cmp(const void *a, const void *b)
 }
 
 /* Stream-decode every unique waveform through the live decoder. Pass 1 runs to the
- * END frame; for looped waveforms a second pass re-runs the loop region so check.py
+ * END frame; for looped waveforms a second pass re-runs the loop region so the gates
  * can verify the carried-history seam. */
 static void decode_dump(const ae3_synth *s)
 {
@@ -250,7 +250,7 @@ static void decode_dump(const ae3_synth *s)
     }
 }
 
-/* Pitch table + register grid for check.py: PTBL = the active table; R lines = the
+/* Pitch table + register grid for the corpus gates: PTBL = the active table; R lines = the
  * register for every tone at its window edges/root under a spread of bend values,
  * mirrored in Python straight from the ev_set_pitch disassembly. */
 static void pitch_dump(ae3_synth *s)
@@ -287,7 +287,7 @@ static void pitch_dump(ae3_synth *s)
 }
 
 /* Pan table + the VOLL/VOLR registers for every real tone over a grid of velocity,
- * CC7, CC11 and CC10 values -- check.py mirrors the FUN_00400c00 math independently
+ * CC7, CC11 and CC10 values -- the gates mirror the FUN_00400c00 math independently
  * and diffs the ELF's own pan-table bytes against PANLUT. */
 static void vol_dump(const ae3_synth *s)
 {
@@ -326,8 +326,8 @@ static void vol_dump(const ae3_synth *s)
         }
 }
 
-/* Per distinct (a1,a2): isolated per-phase cycle counts, mirrored by check.py against
- * bgm._phase_time. Phases run exactly as adsr_times does: attack 0->max, decay
+/* Per distinct (a1,a2): isolated per-phase cycle counts, mirrored by the gates against
+ * the offline reference. Phases run exactly as its adsr_times does: attack 0->max, decay
  * max->sus, sustain sus->0 (decrease dir only), release max->0. */
 static void env_dump(const ae3_synth *s)
 {

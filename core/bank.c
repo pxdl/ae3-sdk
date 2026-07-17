@@ -1,6 +1,6 @@
-/* bank.c -- Sony "Jam" bank (.hd) parser. C mirror of tools/bgm.py parse_hd(); every
- * validation there is a hard error here too, so a bank this code misreads refuses to load
- * instead of playing wrong. Format provenance and proofs: research/BGM.md. */
+/* bank.c -- Sony "Jam" bank (.hd) parser. C mirror of the project's offline reference
+ * parser; every validation there is a hard error here too, so a bank this code misreads refuses to load
+ * instead of playing wrong. Format provenance and proofs: docs/formats/BGM.md. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,7 +48,7 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         return ae3__fail(s, "velocity chunk at %#x out of range", vel_off);
 
     size_t B = (size_t)prog_off;
-    /* Count field is the LAST INDEX, not the count (proof in bgm.py: the MIDI's highest
+    /* Count field is the LAST INDEX, not the count (proof: the MIDI's highest
      * program number equals it exactly on p_7 / j_6 / s_25_jungle). */
     int nprog = rd16(hd + B) + 1;
     if (B + 2 + (size_t)nprog * 2 > hd_len)

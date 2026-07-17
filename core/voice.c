@@ -1,7 +1,7 @@
 /* voice.c -- streaming PS-ADPCM decoder + SPU2 ADSR envelope.
  *
- * Decoder mirrors tools/bgm.py decode_adpcm bit for bit (verified corpus-wide by
- * check.py); envelope timing mirrors bgm._phase_time exactly. Both run per output
+ * Decoder mirrors the offline reference implementation bit for bit (verified
+ * corpus-wide by the private gates); envelope timing mirrors it exactly. Both run per output
  * sample at AE3_RATE -- the envelope is a live amplitude multiplier, which is the
  * behavior SF2 could not express and the reason the offline pipeline baked fades. */
 #include <string.h>

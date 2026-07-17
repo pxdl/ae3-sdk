@@ -37,7 +37,7 @@ static void reset_channels(ae3_synth *s)
 }
 
 /* The SMF walker's tick advance, transcribed double op for double op from the
- * disassembly (cc/NOTES.md §4) so the Python mirror in check.py can require bitwise
+ * disassembly so the corpus gates' independent mirror can require bitwise
  * equality (-ffp-contract=off is pinned in the Makefile). 0x1.47ae147ae147ap-7 is
  * DAT_0072c558's exact bits (the "0.01" the speed percent multiplies through);
  * 0x1.fffffffffffffp+0 is the play-open "2 quarters/sec" constant; the rate is the
@@ -364,7 +364,7 @@ void ae3_synth_song_volume(ae3_synth *s, int l, int r)
 }
 
 /* The driver's CC dispatch, mirrored from the 128-entry table at EE 0x0069dea8
- * (every handler decompiled + pinned 2026-07-16: decomp/functions_bgm/cc/NOTES.md).
+ * (every handler decompiled from the game and pinned).
  * Corpus ledger: 7/10/11 audible (M4); 1/2 = LFO depth/rate stores (audible only on
  * the 2 flag-0x20 tones -- the LFO renders in M9, the state is kept now); 6/98/99 =
  * the NRPN machine (inert on this corpus: the walker eats CC99 20/30, so the NRPN
@@ -554,7 +554,7 @@ static int32_t bus_sat(int32_t m, uint32_t *peak, uint32_t *clipped)
  * With a reverb preset loaded, reverb-flagged voices ALSO sum into a wet bus (the
  * send: they stay in the dry mix), which is saturated likewise, run through the
  * half-rate network (reverb.c), and returned as dry + EVOL*reverb -- the exact
- * combine tools/spu2rev.c performs, in doubles, then MVOL. Without a preset the
+ * combine the offline oracle performs, in doubles, then MVOL. Without a preset the
  * integer-only path below is byte-identical to pre-M6. */
 static void mix(ae3_synth *s, float *out, int n)
 {
@@ -602,7 +602,7 @@ static void mix(ae3_synth *s, float *out, int n)
         double rl, rr;
         ae3__rev_sample(&s->rev, w16[2 * j], w16[2 * j + 1], &rl, &rr);
         for (int c = 0; c < 2; c++) {
-            /* spu2rev.c's combine, operand for operand (check.py diffs it bitwise) */
+            /* the oracle's combine, operand for operand (the corpus gates diff it bitwise) */
             double l = (double)d16[2 * j + c] / 32768.0
                      + s->rev.evol * (c ? rr : rl);
             if (l > 1.0) l = 1.0;
