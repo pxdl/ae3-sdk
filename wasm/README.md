@@ -52,7 +52,8 @@ the platform default), the core is integer DSP plus IEEE doubles, and the one
 libc dependency that could diverge (libm `pow` in the fallback ET pitch table)
 is covered by both gates. Never enable relaxed SIMD on this target.
 
-`test/wav.mjs` documents the one subtlety worth knowing: dry renders emit
+`js/wav.mjs` (shipped: the player's WAV export uses it) documents the one
+subtlety worth knowing: dry renders emit
 floats exactly on the s16/32768 grid, but reverb renders are fractional and the
 WAV writers' `lrintf` round-half-to-even is load-bearing — the JS writer
 implements it explicitly.

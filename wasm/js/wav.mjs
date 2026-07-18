@@ -1,6 +1,9 @@
 /* WAV framing byte-identical to harness/wavdump.c: 44-byte canonical header,
  * s16 stereo 48 kHz, silent tail appended after the song. The hash gates
- * compare whole files, so every byte here mirrors the C writer. */
+ * compare whole files, so every byte here mirrors the C writer.
+ *
+ * Lives in js/ (not test/) because it ships: the web player's export path
+ * encodes with exactly this framing so exported WAVs hash-match wavdump. */
 
 export const RATE = 48000;
 

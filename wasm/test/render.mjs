@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AE3Synth } from "../js/ae3synth.mjs";
-import { RATE, wavHeader, floatToS16 } from "./wav.mjs";
+import { RATE, wavHeader, floatToS16 } from "../js/wav.mjs";
 
 const WASM = join(dirname(fileURLToPath(import.meta.url)), "../dist/ae3synth.wasm");
 

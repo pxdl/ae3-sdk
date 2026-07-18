@@ -6,6 +6,7 @@
   "private": true,
   "exports": {
     ".": "./js/ae3synth.mjs",
+    "./wav.mjs": "./js/wav.mjs",
     "./ae3synth.wasm": "./dist/ae3synth.wasm"
   },
   "files": [
