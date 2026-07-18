@@ -106,3 +106,20 @@ double ae3w_pos(const ae3_synth *s)
 {
     return (double)ae3_synth_pos(s);
 }
+
+/* addr, samples, loop_start, prog, tone, root, tune, refs */
+int ae3w_bank_waveform(const ae3_synth *s, int i, int32_t out[8])
+{
+    ae3_waveform w;
+    if (!ae3_synth_bank_waveform(s, i, &w))
+        return 0;
+    out[0] = (int32_t)w.addr;
+    out[1] = (int32_t)w.samples;
+    out[2] = w.loop_start;
+    out[3] = w.prog;
+    out[4] = w.tone;
+    out[5] = w.root;
+    out[6] = w.tune;
+    out[7] = w.refs;
+    return 1;
+}

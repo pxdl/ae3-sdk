@@ -201,31 +201,20 @@ static uint64_t fnv_s16(uint64_t h, int16_t v)
     return h;
 }
 
-static int addr_cmp(const void *a, const void *b)
-{
-    return (int)*(const uint16_t *)a - (int)*(const uint16_t *)b;
-}
-
-/* Stream-decode every unique waveform through the live decoder. Pass 1 runs to the
- * END frame; for looped waveforms a second pass re-runs the loop region so the gates
- * can verify the carried-history seam. */
+/* Every unique waveform, enumerated through the bank-introspection API. Pass 1
+ * streams the live decoder to the END frame; for looped waveforms a second pass
+ * re-runs the loop region so the gates can verify the carried-history seam. The
+ * API's table and PCM decode must agree with the stream exactly -- any drift
+ * dies here before the corpus gate even diffs against the oracle. */
 static void decode_dump(const ae3_synth *s)
 {
     const ae3_bank *b = &s->bank;
-    uint16_t addrs[4096];
-    int na = 0;
-    for (int i = 0; i < b->nprogs; i++)
-        for (int t = 0; b->progs[i].present && t < b->progs[i].ntones; t++) {
-            uint16_t a = b->progs[i].tones[t].addr;
-            if (a != AE3_NO_SAMPLE)
-                addrs[na++] = a;
-        }
-    qsort(addrs, (size_t)na, sizeof *addrs, addr_cmp);
-    for (int i = 0; i < na; i++) {
-        if (i && addrs[i] == addrs[i - 1])
-            continue;
+    int nw = ae3_synth_bank_waveforms(s);
+    for (int i = 0; i < nw; i++) {
+        ae3_waveform w;
+        ae3_synth_bank_waveform(s, i, &w);
         ae3_adpcm d;
-        ae3_adpcm_init(&d, b->bd, b->bd_len, (uint32_t)addrs[i] * 8);
+        ae3_adpcm_init(&d, b->bd, b->bd_len, w.addr * 8);
         uint64_t h = FNV_BASIS, h2 = FNV_BASIS;
         uint32_t n = 0, n2 = 0;
         int16_t v;
@@ -239,14 +228,35 @@ static void decode_dump(const ae3_synth *s)
         }
         int32_t loop = -1;
         if (d.loops) {                        /* looped: v is the first post-seam sample */
-            loop = (d.loop_frame - (int32_t)d.start) / 16 * 28;
+            loop = d.loop_frame >= 0 ? (d.loop_frame - (int32_t)d.start) / 16 * 28
+                                     : 0;     /* SPU default: loop to the start */
             uint32_t want = n - (uint32_t)loop;   /* one full second pass */
             h2 = fnv_s16(h2, v);
             for (n2 = 1; n2 < want && ae3_adpcm_next(&d, &v); n2++)
                 h2 = fnv_s16(h2, v);
         }
-        printf("W addr=%u n=%u loop=%d hash=%016llx n2=%u hash2=%016llx\n",
-               addrs[i], n, loop, (unsigned long long)h, n2, (unsigned long long)h2);
+        if (w.samples != n || w.loop_start != loop) {
+            fprintf(stderr, "addr %u: api samples/loop %u/%d vs stream %u/%d\n",
+                    w.addr, w.samples, w.loop_start, n, loop);
+            exit(1);
+        }
+        int16_t *pcm = malloc(n ? n * sizeof *pcm : sizeof *pcm);
+        if (!pcm) { fprintf(stderr, "out of memory\n"); exit(1); }
+        int got = ae3_synth_bank_waveform_pcm(s, i, pcm, n);
+        uint64_t hapi = FNV_BASIS;
+        for (uint32_t k = 0; k < n; k++)
+            hapi = fnv_s16(hapi, pcm[k]);
+        free(pcm);
+        if (got != (int)n || hapi != h) {
+            fprintf(stderr, "addr %u: api pcm n=%d hash=%016llx vs stream n=%u "
+                    "hash=%016llx\n", w.addr, got, (unsigned long long)hapi, n,
+                    (unsigned long long)h);
+            exit(1);
+        }
+        printf("W addr=%u n=%u loop=%d hash=%016llx n2=%u hash2=%016llx "
+               "prog=%u tone=%u root=%u tune=%d refs=%u\n",
+               w.addr, n, loop, (unsigned long long)h, n2, (unsigned long long)h2,
+               w.prog, w.tone, w.root, w.tune, w.refs);
     }
 }
 

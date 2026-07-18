@@ -25,7 +25,9 @@ EXPORT_LIST = _malloc _free \
   _ae3_synth_song_volume _ae3_synth_set_loop _ae3_synth_event_timing \
   _ae3_synth_render _ae3_synth_done \
   _ae3_synth_seq_events _ae3_synth_seq_ppqn \
-  _ae3w_pos _ae3w_voice _ae3w_seq_event _ae3w_clock _ae3w_stats
+  _ae3_synth_bank_waveforms _ae3_synth_bank_waveform_pcm \
+  _ae3w_pos _ae3w_voice _ae3w_seq_event _ae3w_clock _ae3w_stats \
+  _ae3w_bank_waveform
 comma   := ,
 space   := $(subst ,, )
 EXPORTS = $(subst $(space),$(comma),$(strip $(EXPORT_LIST)))

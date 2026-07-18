@@ -29,6 +29,14 @@ RENDERS = {
     "adsr_edges": [],
 }
 
+# stdout modes, hashed as text. "decode" gates the bank-introspection API:
+# wavdump --decode enumerates waveforms through it, cross-checks the table and
+# PCM against the raw decoder stream internally, and prints per-waveform
+# sample counts / loop points / FNV hashes / naming refs.
+DUMPS = {
+    "decode": ["--decode"],
+}
+
 
 def main():
     update = "--update" in sys.argv
@@ -51,6 +59,21 @@ def main():
             with open(out, "rb") as f:
                 hashes[name] = hashlib.sha256(f.read()).hexdigest()
 
+    for name, flags in DUMPS.items():
+        r = subprocess.run(
+            [WAVDUMP, *flags, os.path.join(VEC, "vec.hd"), os.path.join(VEC, "vec.bd")],
+            check=True, capture_output=True)
+        hashes[name] = hashlib.sha256(r.stdout).hexdigest()
+        if name == "decode":
+            # API-visible projection (no n2=/hash2= seam fields): the wasm gate
+            # reconstructs this exact text through the JS binding, so the shared
+            # golden entry proves WASM API == native API on the vectors.
+            api = "".join(
+                " ".join(t for t in line.split()
+                         if not t.startswith(("n2=", "hash2="))) + "\n"
+                for line in r.stdout.decode().splitlines())
+            hashes["decode_api"] = hashlib.sha256(api.encode()).hexdigest()
+
     if update:
         with open(GOLDEN, "w") as f:
             for name, h in sorted(hashes.items()):
@@ -64,13 +87,13 @@ def main():
             h, name = line.split()
             golden[name] = h
     fail = 0
-    for name in sorted(RENDERS):
+    for name in sorted(hashes):
         got, want = hashes[name], golden.get(name)
         ok = got == want
         print(f"{'PASS' if ok else 'FAIL'} {name}"
               + ("" if ok else f"  got {got[:16]}… want {(want or 'MISSING')[:16]}…"))
         fail += not ok
-    extra = set(golden) - set(RENDERS)
+    extra = set(golden) - set(hashes)
     if extra:
         print(f"FAIL stale golden entries: {sorted(extra)}")
         fail += 1

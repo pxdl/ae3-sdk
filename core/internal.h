@@ -46,6 +46,8 @@ typedef struct {
     size_t    bd_len;
     uint16_t  vel_count;  /* 0 in all 62 banks => curve never consulted */
     uint8_t   vel[128];   /* identity in all 62 banks; kept so a non-identity bank screams */
+    ae3_waveform *waves;  /* introspection table: unique tone addrs, ascending */
+    int       nwaves;
 } ae3_bank;
 
 /* ---- voice: ADPCM decoder + ADSR envelope (voice.c) --------------------- */

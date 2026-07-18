@@ -17,7 +17,111 @@ void ae3__bank_free(ae3_bank *b)
         free(b->progs[i].tones);
     free(b->progs);
     free(b->bd);
+    free(b->waves);
     memset(b, 0, sizeof *b);
+}
+
+/* ---- waveform introspection table (public API at the bottom) -------------- */
+
+/* Single-pass decode of the waveform at byte offset `start`: the note-on
+ * path's streaming decoder run to the END frame (or off the body's end).
+ * out may be NULL / short (count-only: at most `max` samples are written,
+ * the full count is still returned). Sets *loop_start to the sample index
+ * the END+REPEAT frame jumps back to, -1 for a one-shot. */
+static uint32_t wave_decode(const uint8_t *bd, size_t bd_len, uint32_t start,
+                            int16_t *out, uint32_t max, int32_t *loop_start)
+{
+    ae3_adpcm d;
+    ae3_adpcm_init(&d, bd, bd_len, start);
+    uint32_t n = 0;
+    int32_t loop = -1;
+    int16_t v;
+    for (;;) {
+        if (!ae3_adpcm_next(&d, &v))
+            break;                    /* one-shot ended (or ran off the body) */
+        if (d.loops) {                /* jumped: v is the first post-seam sample */
+            loop = d.loop_frame >= 0 ? (d.loop_frame - (int32_t)d.start) / 16 * 28
+                                     : 0;   /* SPU default: loop to the start */
+            break;
+        }
+        if (out && n < max)
+            out[n] = v;
+        n++;
+    }
+    *loop_start = loop;
+    return n;
+}
+
+static int cmp_u16(const void *a, const void *b)
+{
+    return (int)*(const uint16_t *)a - (int)*(const uint16_t *)b;
+}
+
+static int cmp_wave_addr(const void *key, const void *elem)
+{
+    uint32_t k = *(const uint32_t *)key;
+    const ae3_waveform *w = elem;
+    return k < w->addr ? -1 : k > w->addr ? 1 : 0;
+}
+
+static int build_waves(ae3_synth *s)
+{
+    ae3_bank *bk = &s->bank;
+    int nt = 0;
+    for (int i = 0; i < bk->nprogs; i++)
+        for (int t = 0; bk->progs[i].present && t < bk->progs[i].ntones; t++)
+            if (bk->progs[i].tones[t].addr != AE3_NO_SAMPLE)
+                nt++;
+    if (nt == 0)
+        return 0;                     /* nwaves stays 0 */
+
+    uint16_t *addrs = malloc((size_t)nt * sizeof *addrs);
+    if (!addrs)
+        return ae3__fail(s, "out of memory");
+    int na = 0;
+    for (int i = 0; i < bk->nprogs; i++)
+        for (int t = 0; bk->progs[i].present && t < bk->progs[i].ntones; t++)
+            if (bk->progs[i].tones[t].addr != AE3_NO_SAMPLE)
+                addrs[na++] = bk->progs[i].tones[t].addr;
+    qsort(addrs, (size_t)na, sizeof *addrs, cmp_u16);
+
+    int nu = 0;
+    for (int i = 0; i < na; i++)
+        if (i == 0 || addrs[i] != addrs[i - 1])
+            nu++;
+    bk->waves = calloc((size_t)nu, sizeof *bk->waves);
+    if (!bk->waves) {
+        free(addrs);
+        return ae3__fail(s, "out of memory");
+    }
+    for (int i = 0, w = 0; i < na; i++)
+        if (i == 0 || addrs[i] != addrs[i - 1])
+            bk->waves[w++].addr = addrs[i];
+    bk->nwaves = nu;
+    free(addrs);
+
+    for (int w = 0; w < nu; w++)
+        bk->waves[w].samples = wave_decode(bk->bd, bk->bd_len,
+                                           bk->waves[w].addr * 8, NULL, 0,
+                                           &bk->waves[w].loop_start);
+
+    /* first-referencing (prog, tone) + reference counts, in slot/tone order */
+    for (int i = 0; i < bk->nprogs; i++)
+        for (int t = 0; bk->progs[i].present && t < bk->progs[i].ntones; t++) {
+            const ae3_tone *x = &bk->progs[i].tones[t];
+            if (x->addr == AE3_NO_SAMPLE)
+                continue;
+            uint32_t key = x->addr;
+            ae3_waveform *wv = bsearch(&key, bk->waves, (size_t)nu,
+                                       sizeof *bk->waves, cmp_wave_addr);
+            if (wv->refs++ == 0) {
+                wv->prog = (uint16_t)i;
+                wv->tone = (uint16_t)t;
+                wv->root = x->root;
+                wv->tune = x->tune;
+            }
+        }
+    return 0;
 }
 
 int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
@@ -131,5 +235,30 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         return ae3__fail(s, "out of memory");
     memcpy(bk->bd, bd, bd_len);
     bk->bd_len = bd_len;
-    return 0;
+    return build_waves(s);
+}
+
+/* ---- bank introspection: the public read-only surface --------------------- */
+
+int ae3_synth_bank_waveforms(const ae3_synth *s)
+{
+    return s->have_bank ? s->bank.nwaves : 0;
+}
+
+bool ae3_synth_bank_waveform(const ae3_synth *s, int i, ae3_waveform *out)
+{
+    if (!s->have_bank || i < 0 || i >= s->bank.nwaves)
+        return false;
+    *out = s->bank.waves[i];
+    return true;
+}
+
+int ae3_synth_bank_waveform_pcm(const ae3_synth *s, int i,
+                                int16_t *out, uint32_t max)
+{
+    if (!s->have_bank || i < 0 || i >= s->bank.nwaves)
+        return -1;
+    int32_t loop;
+    return (int)wave_decode(s->bank.bd, s->bank.bd_len,
+                            s->bank.waves[i].addr * 8, out, max, &loop);
 }

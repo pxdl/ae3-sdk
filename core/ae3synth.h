@@ -231,6 +231,39 @@ int      ae3_synth_seq_events(const ae3_synth *s);
 bool     ae3_synth_seq_event(const ae3_synth *s, int i, ae3_seq_event *out);
 uint16_t ae3_synth_seq_ppqn(const ae3_synth *s);
 
+/* ---- bank introspection (read-only) --------------------------------------
+ * The surface a sample-kit exporter needs: the loaded bank's distinct
+ * waveforms (unique tone sample addresses -- tones commonly share one; the
+ * hard-panned L/R pairs are two tones over one waveform), each with its
+ * single-pass PCM through the live note-on ADPCM decoder, its loop point,
+ * and a first-referencing (prog, tone, root, tune) for naming. Waveforms are
+ * ordered by ascending .bd offset -- the bank's own layout order. */
+
+typedef struct {
+    uint32_t addr;        /* tone sample address, SPU 8-byte units (*8 = .bd byte offset) */
+    uint32_t samples;     /* single-pass PCM length: 28 per frame through the END frame */
+    int32_t  loop_start;  /* sample index the END+REPEAT frame jumps back to; -1 = one-shot.
+                             REPEAT with no LOOP_START-flagged frame loops to 0, the SPU
+                             default (docs/formats/BGM.md; corpus always flags it) */
+    uint16_t prog, tone;  /* first (program slot, tone index) referencing it */
+    uint8_t  root;        /* that tone's root key (the key it plays at 44100 Hz) */
+    int8_t   tune;        /* that tone's fine tune, 1/16 semitone units */
+    uint16_t refs;        /* how many tones reference this waveform */
+} ae3_waveform;
+
+/* Waveform count (0 when no bank is loaded) and per-waveform copy (false =
+ * index out of range). The table is built at bank load. */
+int  ae3_synth_bank_waveforms(const ae3_synth *s);
+bool ae3_synth_bank_waveform(const ae3_synth *s, int i, ae3_waveform *out);
+
+/* Decode waveform i's single pass (loop not unrolled) into out, writing at
+ * most max samples. Returns the full single-pass sample count (size from
+ * ae3_waveform.samples, or call with max 0 to measure), or -1 if no bank is
+ * loaded / i is out of range. Same streaming decoder as the note-on path,
+ * so the corpus gates hold it bit-exact against the offline oracle. */
+int  ae3_synth_bank_waveform_pcm(const ae3_synth *s, int i,
+                                 int16_t *out, uint32_t max);
+
 /* The sequencer's live tempo segment + loop bookkeeping -- everything needed to
  * map the render position back onto the single-pass timeline:
  *     eff_tick      = seg_tick + (pos - seg_sample) / spt
