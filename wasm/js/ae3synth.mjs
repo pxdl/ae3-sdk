@@ -2,10 +2,12 @@
  *
  * Environment-agnostic by construction: no fs, no fetch, no TextDecoder (absent
  * from AudioWorkletGlobalScope), no Emscripten glue. The caller supplies the
- * wasm as bytes or a precompiled WebAssembly.Module (the worklet case: compile
- * on the main thread, postMessage the Module in). One wasm instance per synth --
- * isolated heap, and the export path's second synth never shares state with the
- * audio path's.
+ * wasm as bytes or a precompiled WebAssembly.Module. AudioWorklet callers must
+ * post the BYTES and compile inside the worklet: Chrome silently drops a
+ * postMessage'd WebAssembly.Module bound for an AudioWorkletGlobalScope -- no
+ * error on either side, the message just never arrives (measured 2026-07-18,
+ * ae3-player W4). One wasm instance per synth -- isolated heap, and the export
+ * path's second synth never shares state with the audio path's.
  *
  * API mirrors core/ae3synth.h one-to-one; see that header for semantics. Struct
  * returns cross the boundary through the flatteners in ../abi.c -- the field
