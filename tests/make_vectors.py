@@ -135,6 +135,79 @@ PROGS_LFO = [
                      bend=4, lfo=0, flags=0x40)], lfo=1),
 ]
 
+# ---------------------------------------------------------------- EXST (.x)
+# Two synthetic stream vectors for the ae3_exst_* decoder (docs/formats/
+# EXST.md): 0x78 header + 2048-byte sectors, channel slices contiguous
+# (2048/ch bytes). Coverage: mono + stereo, every filter, shifts 0..12, the
+# illegal-shift (15->9) and illegal-filter (7->0) hardware clamps, a stray
+# mid-file END flag (decode must NOT stop -- the corpus' phone_038/448 case),
+# the flag-2 silent pad tail (one pad frame with a nonzero byte 0 -- pad
+# detection ignores it), unequal per-channel pad runs (trim = min across
+# channels), and a stereo header that OVERSTATES length (the §4 anomaly).
+
+X_SECTOR = 0x800
+X_F_PAD = 0x02
+
+
+def xframe(idx, shift, filt, flags=0, silent=False):
+    payload = bytes(0 if silent else ((3 * idx + i) * 7 + 11) % 253
+                    for i in range(14))
+    return bytes(((filt << 4) | shift, flags)) + payload
+
+
+def xheader(ch, rate, length):
+    h = bytearray(0x78)
+    h[0:4] = b"EXST"
+    struct.pack_into("<I", h, 0x04, ch << 16)
+    struct.pack_into("<I", h, 0x08, rate)
+    # loop flag/start stay 0 -- every shipped file is one-shot
+    struct.pack_into("<I", h, 0x14, length)
+    # authored volume convention: mono full on both sides of ch 0; stereo
+    # hard-panned ch0 left / ch1 right (EXST.md §1 authoring note)
+    if ch == 1:
+        struct.pack_into("<I", h, 0x18, 0x407F)
+        struct.pack_into("<I", h, 0x38, 0x407F)
+    else:
+        struct.pack_into("<I", h, 0x18, 0x407F)
+        struct.pack_into("<I", h, 0x38 + 4, 0x407F)
+    return bytes(h)
+
+
+def xchannel_frames(nframes, seed, pad):
+    """Frame list for one channel: varied body, `pad` silent flag-2 tail."""
+    out = []
+    for i in range(nframes - pad):
+        shift, filt, flags = i % 13, i % 5, 0
+        if i == 40:
+            shift, filt = 15, 1        # illegal shift, clamps to 9
+        if i == 41:
+            shift, filt = 4, 7         # illegal filter, clamps to 0
+        if i == 100:
+            flags = F_END              # stray mid-file END: decode ignores it
+        out.append(xframe(seed + i, shift, filt, flags))
+    for i in range(pad):
+        # first pad frame carries a nonzero byte 0 (filter 2, shift 4):
+        # detection reads only the flag + data bytes, decode still runs it
+        s, f = (4, 2) if i == 0 else (0, 0)
+        out.append(xframe(0, s, f, X_F_PAD, silent=True))
+    return out
+
+
+def exst_file(ch, rate, sectors, seeds, pads, claim=None):
+    per = X_SECTOR // ch
+    fps = per // 16                    # frames per channel slice per sector
+    chans = [xchannel_frames(sectors * fps, seeds[c], pads[c])
+             for c in range(ch)]
+    body = b""
+    for s in range(sectors):
+        for c in range(ch):
+            body += b"".join(chans[c][s * fps:(s + 1) * fps])
+    return xheader(ch, rate, claim if claim is not None else sectors) + body
+
+
+X_MONO = exst_file(1, 24000, 2, seeds=[0], pads=[6])
+X_STEREO = exst_file(2, 48000, 3, seeds=[0, 1000], pads=[3, 2], claim=4)
+
 # ---------------------------------------------------------------- MIDI
 
 
@@ -261,7 +334,12 @@ def main():
     for name, data in MIDIS.items():
         with open(os.path.join(OUT, name + ".mid"), "wb") as f:
             f.write(data)
+    with open(os.path.join(OUT, "vec_mono.x"), "wb") as f:
+        f.write(X_MONO)
+    with open(os.path.join(OUT, "vec_stereo.x"), "wb") as f:
+        f.write(X_STEREO)
     print(f"vec.hd {len(hd)}B  vlfo.hd {len(hd_lfo)}B  vec.bd {len(BD)}B  "
+          f"vec_mono.x {len(X_MONO)}B  vec_stereo.x {len(X_STEREO)}B  "
           f"+ {len(MIDIS)} midis -> {OUT}")
 
 

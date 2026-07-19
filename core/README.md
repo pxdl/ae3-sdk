@@ -27,6 +27,7 @@ being bit-identical across compilers and architectures.
 | `gauss.c` | the SPU2's 512-entry 4-tap interpolation table (psx-spx transcription) |
 | `vol.c` | the driver's linear volume chain + the SPU2 pan table (rebuilt from its rule) |
 | `reverb.c` | the SPU2 reverb, streaming: half-band FIR down/up + 24 kHz network; preset from the user's `libsd.irx` |
+| `exst.c` | EXST (`.x`) streamed-ADPCM decoder (`sound/stream` family): header parse, per-sector decode with per-channel history, trailing-pad scan — `../docs/formats/EXST.md` |
 | `synth.c` | instance, note-on tone scan, the 48-slot voice pool, CC dispatch, loop markers, both event clocks, mixer + wet bus |
 | `internal.h` | shared internals (wavdump's white-box hooks only; every other consumer — bgmplay included — uses `ae3synth.h`) |
 

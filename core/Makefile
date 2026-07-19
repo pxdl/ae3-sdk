@@ -4,7 +4,7 @@ CC     ?= cc
 # bit-exactness gates (native check + WASM A/B) depend on.
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -ffp-contract=off
 
-OBJS = bank.o seq.o voice.o pitch.o gauss.o vol.o reverb.o synth.o cue.o
+OBJS = bank.o seq.o voice.o pitch.o gauss.o vol.o reverb.o synth.o cue.o exst.o
 
 libae3synth.a: $(OBJS)
 	ar rcs $@ $(OBJS)

@@ -64,6 +64,10 @@ typedef struct {
 #define AE3_AF_REPEAT    0x02u
 #define AE3_AF_LOOPSTART 0x04u
 
+/* The PS-ADPCM predictor table, shared by the bank decoder (voice.c) and the
+ * EXST stream decoder (exst.c) -- one source of truth for the codec constants. */
+extern const int32_t ae3__adpcm_coef[5][2];
+
 /* Streaming decoder: pulls one PCM sample at a time, decoding 16-byte frames
  * (28 samples) on demand. Mirrors bgm.decode_adpcm bit for bit; history is carried
  * across the loop seam (the loop-start frame is re-decoded with live history). */

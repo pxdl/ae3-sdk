@@ -141,3 +141,11 @@ census over a directory (`--census`), and WAV decode (`--decode`) using
 a bit-exact PS-ADPCM decoder with per-sector deinterleave. Decode writes
 every payload frame including the flag-2 silent padding tail (`--trim-pad`
 drops the trailing pad run, shortened equally across channels).
+
+Runtime: the C library `ae3_exst_*` (`core/exst.c`; API in `core/ae3synth.h`)
+— header parse, per-sector decode with per-channel history in a state object,
+trailing-pad scan — with `harness/exstdump` as its native CLI and the
+`AE3Exst` class (`wasm/js/ae3synth.mjs`) as the wasm binding. The Python tool
+stays the differ oracle: the shared golden vectors (`tests/`) pin native ==
+wasm == the `ae3 exst --decode` WAV framing, and the private corpus gate
+holds the C decoder sample-identical to the oracle across all 1158 files.

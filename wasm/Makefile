@@ -30,7 +30,9 @@ EXPORT_LIST = _malloc _free \
   _ae3_synth_seq_events _ae3_synth_seq_ppqn \
   _ae3_synth_bank_waveforms _ae3_synth_bank_waveform_pcm \
   _ae3w_pos _ae3w_voice _ae3w_seq_event _ae3w_clock _ae3w_stats \
-  _ae3w_bank_waveform
+  _ae3w_bank_waveform \
+  _ae3_exst_reset _ae3_exst_decode _ae3_exst_trailing_pad \
+  _ae3w_exst_parse _ae3w_exst_state_size
 comma   := ,
 space   := $(subst ,, )
 EXPORTS = $(subst $(space),$(comma),$(strip $(EXPORT_LIST)))

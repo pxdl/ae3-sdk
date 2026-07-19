@@ -1,6 +1,6 @@
 # wasm/ — the core's WebAssembly target (`@ae3/synth`)
 
-The same eight C files as `core/`, compiled by Emscripten to ONE standalone
+The same C files as `core/`, compiled by Emscripten to ONE standalone
 `dist/ae3synth.wasm` — no JS glue, no toolchain-generated loader. The module's
 entire import surface is `env.emscripten_notify_memory_growth`, so it
 instantiates anywhere a `WebAssembly.Module` does: an AudioWorkletGlobalScope
@@ -33,6 +33,10 @@ const n = s.render(buf);     // interleaved stereo at 48 kHz
 No `TextDecoder`, no `fetch`, no `fs` — none of those exist in every target
 scope. The caller supplies wasm bytes or a precompiled `WebAssembly.Module`
 (worklet case: compile on the main thread, `postMessage` the Module).
+
+`AE3Exst` (same module) is the standalone EXST (`.x`) stream decoder over
+`ae3_exst_*`: `parseHeader` / `decodeFile({trimPad})` for whole files,
+`reset` / `decodeSector` for chunked decode of the multi-minute tracks.
 
 ## Bit-exactness
 

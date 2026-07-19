@@ -107,6 +107,33 @@ double ae3w_pos(const ae3_synth *s)
     return (double)ae3_synth_pos(s);
 }
 
+/* EXST header: channels, rate, loop, loop_start, length, vol_l[8], vol_r[8],
+ * reverb[8] -- 29 u32s in ae3_exst_header declaration order. */
+int ae3w_exst_parse(const void *hdr, size_t len, uint32_t out[29])
+{
+    ae3_exst_header h;
+    if (ae3_exst_parse(hdr, len, &h) != 0)
+        return 0;
+    out[0] = h.channels;
+    out[1] = h.rate;
+    out[2] = h.loop;
+    out[3] = h.loop_start;
+    out[4] = h.length;
+    for (int i = 0; i < AE3_EXST_MAXCH; i++) {
+        out[5 + i] = h.vol_l[i];
+        out[13 + i] = h.vol_r[i];
+        out[21 + i] = h.reverb[i];
+    }
+    return 1;
+}
+
+/* The binding allocates decode states with malloc; sizeof crosses here so JS
+ * never assumes the struct layout. */
+int ae3w_exst_state_size(void)
+{
+    return (int)sizeof(ae3_exst);
+}
+
 /* addr, samples, loop_start, prog, tone, root, tune, refs */
 int ae3w_bank_waveform(const ae3_synth *s, int i, int32_t out[8])
 {

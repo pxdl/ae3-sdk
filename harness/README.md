@@ -17,6 +17,21 @@ Renders a song to WAV, or dumps parsed state: `--dump` (bank/sequence),
 (dry/wet/combined buses), `--tone` (single-tone render). Without the IRX
 donors: computed equal-tempered pitch table, pure-dry mix.
 
+## exstdump — EXST (.x) stream inspect / decode
+
+```bash
+make exstdump
+./exstdump FILE.x...                                   # header info lines
+./exstdump --decode [--trim-pad] [-o OUT.wav] FILE.x   # decode to WAV
+./exstdump --pcm [-o OUT.pcm] FILE.x                   # raw interleaved s16
+```
+
+Public-API consumer of `ae3_exst_*` (like bgmplay is of the synth). Decodes
+the actual whole-sector payload — never the header's length field, which 16
+shipped files overstate (`../docs/formats/EXST.md` §4, warned on stderr). WAV
+framing is byte-identical to `ae3 exst --decode`, so the private corpus gate
+diffs whole files.
+
 ## bgmplay — SDL2 player / visualizer
 
 ```bash

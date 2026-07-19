@@ -326,4 +326,64 @@ typedef struct {
 
 void ae3_synth_clock(const ae3_synth *s, ae3_clock *out);
 
+/* ---- EXST (.x) streamed ADPCM (exst.c) ----------------------------------
+ * Decoder for the sound/stream family: 0x78-byte header + PS-ADPCM payload in
+ * 2048-byte sectors, each split contiguously between the channels. Format +
+ * EE provenance: docs/formats/EXST.md. Standalone -- no ae3_synth instance;
+ * the same codec math as the bank decoder (voice.c), held bit-exact to the
+ * offline oracle by the corpus gates.
+ *
+ * Non-goals (VIEWER_PLAN §1): no SPU voice/volume/pitch emulation (vol_l/
+ * vol_r/rate are header metadata the player applies at output), no IOP
+ * streaming/starve model, no loop playback beyond reporting the header
+ * fields (all 1158 shipped files are one-shot). */
+
+#define AE3_EXST_HDR    0x78
+#define AE3_EXST_SECTOR 2048
+#define AE3_EXST_MAXCH  8
+
+typedef struct {
+    uint16_t channels;    /* s16 at +0x06 (the u32 is ch<<16); validated 1..8 */
+    uint32_t rate;        /* +0x08, Hz -- fed raw to the driver's set-pitch */
+    uint32_t loop;        /* +0x0c, 0 = one-shot (all shipped files) */
+    uint32_t loop_start;  /* +0x10, 2048-byte sectors */
+    uint32_t length;      /* +0x14, sectors AS AUTHORED. 16 shipped files
+                             overstate it (EXST.md §4) -- trust the actual
+                             payload, (filesize - AE3_EXST_HDR) / sector */
+    uint32_t vol_l[AE3_EXST_MAXCH];   /* +0x18, per channel; 0x407F = "full" */
+    uint32_t vol_r[AE3_EXST_MAXCH];   /* +0x38 */
+    uint32_t reverb[AE3_EXST_MAXCH];  /* +0x58, effect-bus flags (all 0) */
+} ae3_exst_header;
+
+/* Parse + validate a stream header (magic, channels 1..8 -- the EE parser's
+ * range). len is the available byte count, >= AE3_EXST_HDR. 0 ok, -1 bad. */
+int ae3_exst_parse(const void *hdr, size_t len, ae3_exst_header *out);
+
+/* Decode state: per-channel ADPCM history, carried across sectors so a
+ * sequential decode is bit-exact from any starting point's history. Seek =
+ * ae3_exst_reset + decode from sector N: exact from 0 (streams start with
+ * zero history), audibly converged within a frame or two mid-stream. */
+typedef struct {
+    int32_t channels;
+    int32_t h1[AE3_EXST_MAXCH], h2[AE3_EXST_MAXCH];
+} ae3_exst;
+
+/* Arm the state for a stream. Beyond the parser's 1..8, per-sector decode
+ * needs the channel slice (2048/ch bytes) frame-aligned -- ch in {1,2,4,8}.
+ * Every shipped file is 1 or 2. 0 ok, -1 unsupported channel count. */
+int ae3_exst_reset(ae3_exst *d, int channels);
+
+/* Decode one 2048-byte sector into interleaved s16: channel c's slice is
+ * sector[c*(2048/ch) ..], 28 samples per 16-byte frame. Writes 3584 samples
+ * total regardless of channel count; returns samples per channel (3584/ch),
+ * or -1 on an unarmed state. Payload flags never terminate decode (streams
+ * decode to the end of the payload; the EE never reads them -- EXST.md §2). */
+int ae3_exst_decode(ae3_exst *d, const void *sector, int16_t *pcm);
+
+/* Trailing run of silent pad frames (flag byte exactly 0x02 AND 14 zero data
+ * bytes -- byte 0 is ignored, mirroring the oracle), counted per channel over
+ * whole sectors of payload, minimum across channels. Callers trim pad*28
+ * samples per channel; phone files pad up to 64% of the file (EXST.md §2). */
+uint32_t ae3_exst_trailing_pad(const void *payload, size_t len, int channels);
+
 #endif /* AE3SYNTH_H */

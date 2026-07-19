@@ -66,6 +66,44 @@ for (const name of Object.keys(RENDERS).sort()) {
     judge(name, createHash("sha256").update(wav).digest("hex"));
 }
 
+/* EXST stream vectors: decode through the AE3Exst binding and frame as WAV --
+ * the same golden entries the native exstdump renders hash to, so wasm decode
+ * == native decode == the `ae3 exst --decode` framing. The parsed header
+ * fields are hard-asserted against the authored synthetic values (this is the
+ * ae3w_exst_parse flattener's gate). */
+{
+    const { AE3Exst } = await import("../js/ae3synth.mjs");
+    const { wavHeader } = await import("../js/wav.mjs");
+    const exst = await AE3Exst.instantiate(wasmBytes);
+    const EXSTS = {
+        exst_mono: { file: "vec_mono.x", trimPad: false },
+        exst_mono_trim: { file: "vec_mono.x", trimPad: true },
+        exst_stereo: { file: "vec_stereo.x", trimPad: false },
+    };
+    for (const [name, cfg] of Object.entries(EXSTS).sort()) {
+        const data = readFileSync(join(VEC, cfg.file));
+        const { header, pcm } = exst.decodeFile(data, { trimPad: cfg.trimPad });
+        const wav = Buffer.concat([
+            wavHeader(pcm.byteLength, header.channels, header.rate),
+            new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength),
+        ]);
+        judge(name, createHash("sha256").update(wav).digest("hex"));
+    }
+    const expect = (cond, what) => {
+        if (!cond) { console.log(`FAIL exst_header ${what}`); fail++; }
+    };
+    const hm = exst.parseHeader(readFileSync(join(VEC, "vec_mono.x")));
+    const hs = exst.parseHeader(readFileSync(join(VEC, "vec_stereo.x")));
+    expect(hm.channels === 1 && hm.rate === 24000 && hm.length === 2
+        && hm.loop === 0 && hm.loop_start === 0, "mono fields");
+    expect(hm.vol_l[0] === 0x407F && hm.vol_r[0] === 0x407F, "mono volumes");
+    expect(hs.channels === 2 && hs.rate === 48000 && hs.length === 4,
+        "stereo fields (authored overstated length)");
+    expect(hs.vol_l[0] === 0x407F && hs.vol_l[1] === 0 && hs.vol_r[0] === 0
+        && hs.vol_r[1] === 0x407F && hs.reverb.every(x => x === 0),
+        "stereo hard-pan + reverb clear");
+}
+
 /* decode_api: the bank-introspection surface through the binding, in the same
  * projection tests/run_vectors.py derives from wavdump --decode (its W lines
  * minus the seam-only n2=/hash2= fields). Same golden entry on both sides ->

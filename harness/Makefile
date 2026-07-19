@@ -4,10 +4,14 @@ CFLAGS ?= -std=c11 -O2 -Wall -Wextra -ffp-contract=off
 CORE    = ../core
 CORELIB = $(CORE)/libae3synth.a
 
-all: wavdump bgmplay
+all: wavdump bgmplay exstdump
 
 wavdump: wavdump.o $(CORELIB)
 	$(CC) $(CFLAGS) -o $@ wavdump.o $(CORELIB) -lm
+
+# EXST (.x) stream inspect/decode -- public-API consumer like bgmplay
+exstdump: exstdump.o $(CORELIB)
+	$(CC) $(CFLAGS) -o $@ exstdump.o $(CORELIB) -lm
 
 # GUI player/visualizer harness (SDL2 via homebrew pkg-config)
 bgmplay: bgmplay.o $(CORELIB)
@@ -19,10 +23,13 @@ wavdump.o: wavdump.c $(CORE)/ae3synth.h $(CORE)/internal.h
 bgmplay.o: bgmplay.c $(CORE)/ae3synth.h
 	$(CC) $(CFLAGS) -I$(CORE) $(shell pkg-config --cflags sdl2) -c bgmplay.c
 
+exstdump.o: exstdump.c $(CORE)/ae3synth.h
+	$(CC) $(CFLAGS) -I$(CORE) -c exstdump.c
+
 $(CORELIB):
 	$(MAKE) -C $(CORE)
 
 clean:
-	rm -f *.o wavdump bgmplay
+	rm -f *.o wavdump bgmplay exstdump
 
 .PHONY: all clean

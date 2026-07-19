@@ -17,6 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 VEC = os.path.join(HERE, "vectors")
 WAVDUMP = os.path.join(ROOT, "harness", "wavdump")
+EXSTDUMP = os.path.join(ROOT, "harness", "exstdump")
 GOLDEN = os.path.join(HERE, "golden.sha256")
 
 # name -> extra wavdump args
@@ -36,6 +37,16 @@ RENDERS = {
 # vectors rendered against a bank other than vec.hd (all share vec.bd)
 BANKS = {"lfo": "vlfo.hd"}
 
+# EXST stream vectors through exstdump --decode, hashed as whole WAVs. The
+# wasm gate rebuilds the identical files through the AE3Exst binding, so the
+# shared golden entries prove WASM decode == native decode == the framing
+# `ae3 exst --decode` writes. name -> (vector, extra args)
+EXSTS = {
+    "exst_mono": ("vec_mono.x", []),
+    "exst_mono_trim": ("vec_mono.x", ["--trim-pad"]),
+    "exst_stereo": ("vec_stereo.x", []),   # header overstates length: warns
+}
+
 # stdout modes, hashed as text. "decode" gates the bank-introspection API:
 # wavdump --decode enumerates waveforms through it, cross-checks the table and
 # PCM against the raw decoder stream internally, and prints per-waveform
@@ -49,7 +60,8 @@ def main():
     update = "--update" in sys.argv
     subprocess.run(["make", "-C", os.path.join(ROOT, "core")],
                    check=True, capture_output=True)
-    subprocess.run(["make", "-C", os.path.join(ROOT, "harness"), "wavdump"],
+    subprocess.run(["make", "-C", os.path.join(ROOT, "harness"),
+                    "wavdump", "exstdump"],
                    check=True, capture_output=True)
     subprocess.run([sys.executable, os.path.join(HERE, "make_vectors.py")],
                    check=True, capture_output=True)
@@ -63,6 +75,15 @@ def main():
                 [WAVDUMP, os.path.join(VEC, BANKS.get(name, "vec.hd")),
                  os.path.join(VEC, "vec.bd"),
                  os.path.join(VEC, mid + ".mid"), *extra, "-o", out],
+                check=True, capture_output=True)
+            with open(out, "rb") as f:
+                hashes[name] = hashlib.sha256(f.read()).hexdigest()
+
+        for name, (vec, extra) in EXSTS.items():
+            out = os.path.join(td, name + ".wav")
+            subprocess.run(
+                [EXSTDUMP, "--decode", *extra, os.path.join(VEC, vec),
+                 "-o", out],
                 check=True, capture_output=True)
             with open(out, "rb") as f:
                 hashes[name] = hashlib.sha256(f.read()).hexdigest()

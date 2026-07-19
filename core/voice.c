@@ -10,7 +10,7 @@
 
 /* ---- PS-ADPCM ----------------------------------------------------------- */
 
-static const int32_t COEF[5][2] = {
+const int32_t ae3__adpcm_coef[5][2] = {
     { 0, 0 }, { 60, 0 }, { 115, -52 }, { 98, -55 }, { 122, -60 },
 };
 
@@ -39,7 +39,7 @@ static void decode_frame(ae3_adpcm *d)
     d->flags = f[1];
     if (d->flags & AE3_AF_LOOPSTART)
         d->loop_frame = (int32_t)d->frame;
-    int32_t c0 = COEF[filt][0], c1 = COEF[filt][1];
+    int32_t c0 = ae3__adpcm_coef[filt][0], c1 = ae3__adpcm_coef[filt][1];
     int32_t h1 = d->h1, h2 = d->h2;
     for (int i = 0; i < 14; i++) {
         uint8_t b = f[2 + i];
