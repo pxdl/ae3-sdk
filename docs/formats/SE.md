@@ -129,25 +129,28 @@ LFO `+14`/prog[5], flags `+15` — all read the same way by the SE note-on. Thre
 deltas, all read from `FUN_003f8690`:
 
 - **byte 0 = voice cut-group** (BGM: key-low, unused here because indexing is
-  positional). If nonzero, the note-on first calls `FUN_003ff7f8(module, byte0)`,
-  which scans the 48-voice pool for an **active** voice tagged with the same
-  cut-group value and **force-stops it** (sets the release bit, issues key-off).
+  positional). If nonzero, the note-on calls `FUN_003ff7f8(module, byte0)`,
+  which finds active voices tagged with the same module and cut-group, overwrites
+  their ADSR words with `(0, 8)`, then issues key-off.
   This is the standard "a sound must not overlap itself" mechanism — looping and
   one-shot cues that should be monophonic share a nonzero group; `0` = no cut.
-- **byte 1 = a voice-init parameter** (BGM: key-high, unused here). Passed to the
-  voice setup `FUN_003fe360(2, voice, …, byte1)`; value `0x0A` dominates the
-  corpus *(corpus)*. Its precise effect is a playback detail (next milestone).
-- **flag bit 0 (`0x01`) is LIVE here.** In BGM this bit reaches `FUN_003fed10`
-  but the BGM note-on never tests it ([`BGM.md`](BGM.md) §8 "Open: tone flags
-  bit 0" — the consumer it could not find). The SE note-on **is** that consumer:
-  `flags & 1 → FUN_003fed10(voice)` (`cmd[0] |= 0x04`). 34% of tones set it.
+- **byte 1 = voice metadata.** `FUN_003f8690` passes it as the final argument to
+  `FUN_003fe360`, which stores it at live-voice word `+0x18`. It does not enter
+  the traced volume, pan, pitch, ADSR, LFO, noise, key-on, or key-off calculations.
+  The clean-bank census is 5,856 tones: `0x0A` occurs 5,362 times; the other
+  values are `0x7E`×299, `0x14`×140, `0x7F`×36, `0`×17, `0x5A`×1, `0x64`×1.
+- **flag bit 0 (`0x01`) is consumed here.** The SE note-on calls
+  `FUN_003fed10(voice)`, which sets live command bit `0x04`; BGM's note-on never
+  tests the tone flag. No traced volume, pan, pitch, ADSR, LFO, noise, key, or
+  SPU2-register calculation reads that command bit. It is set on 1,599/5,856
+  clean-bank tones.
 - **flag `0x20` hard-arms the LFO.** BGM treats `0x20` as inert (it needs a live
   CC1+CC2 pair, `BGM.md` §8); the SE note-on instead calls the rate setter with
   a fixed rate and the depth setter with `0x7f` whenever `0x20` is set, so an SE
   tone can carry built-in vibrato with no controller input. Flags `0x80` reverb,
   `0x40` use-prog-LFO, `0x10` use-prog-bend behave as in BGM.
 
-## 6. SE sequence chunk (`+0x1C`) — the embedded cues
+## 6. SE sequence chunk (`+0x1C`) — embedded cue bytecode
 
 Where BGM ships a `.mid`, an SE bank stores its sequences inline as a
 **two-level Jam chunk**, proven by `vab_get_seseq(vab, cue, layer)`
@@ -164,24 +167,158 @@ return      seseq + layer_off              # -> the layer's event stream
 Both levels use the Jam `[count=lastindex][u16 offsets]` convention, and — the
 one subtlety — **every offset value is relative to the seseq base**, not to its
 own sub-table (the accessor returns `seseq + off`). Outer offsets are even (they
-are `>>1`'d into the u16 array); inner (layer) offsets are byte-granular pointers
-into a **shared event-stream pool** that follows the tables.
+are `>>1`'d into the u16 array); inner offsets are byte-granular pointers into
+a shared event-stream pool that follows the tables.
 
-So a **cue** (one sound-effect id) owns one or more parallel **layers**, each an
-event stream. Census: **564 live cues, 2699 layers** across the corpus; every
-layer stream ends in the bytes **`FF 2F 00`** — the same end-of-track marker as
-Standard MIDI (2699/2699). The stream body is an SMF-like event list (observed
-status bytes `0xA0..` note, `0xB0..` control); its exact grammar and timing are
-**playback semantics — the next milestone**, deliberately not modelled here.
+A gameplay **bank/request pair** selects one stream. Structurally, the outer
+table is a bank/group and its inner table contains request streams; these were
+provisionally called a cue and parallel layers during the format pass. `SeDesc`
+routing (§6.4) proves that the inner entries are individually selected effects,
+not layers that are automatically played together.
 
-The trigger side is game code: `kick3D(bank, req, vol, …)` (`FUN_0035b258`,
-debug string `kick3D() [%20s] bank:%2d req:%2d vol:%02d`) opens a cue via
-`FUN_003fc3c8`, which resolves `(cue, layer)` through `vab_get_seseq`, installs
-the event-stream pointer into a module, and lets the 60 Hz walker step it into
-`FUN_003f8690`. A cue's bank/priority/reverb/3D-distance defaults come from the
-separate **`SeDesc` table in the exdb design data** (parsed by `ae3 exdb`), not
-from the bank — that table is the cue database; measuring how it routes into
-bank/req is part of the playback milestone.
+### 6.1 Walker and timing
+
+The real walker is **`FUN_003fce80`**, registered as sound-thread callback
+**slot 1** by `FUN_003fd1a0` (`FUN_003f6250(1, 0x003fce80)`). This corrects the
+format-pass handoff's provisional attribution of the walker to `0x003f9dd0`:
+`FUN_003f9d40` (which contains that address) is the downstream **A-status
+driver handler**, reached through the channel-event table at `0x0069e0a8`.
+The callback order is BGM SMF walker slot 0, SE walker slot 1, driver-ring drain
+slot 2, voice flush/free slot 3, and the separate four-byte command queue slot 4.
+
+Cue-open `FUN_003fc3c8` initializes one 0x48-byte request module as follows:
+
+| module offset | walker meaning |
+|---|---|
+| `+0x00` | state: `1` active, `2` ended |
+| `+0x1C` | float advance per sound callback |
+| `+0x20` | float elapsed time for the current delay |
+| `+0x24` | float current delay |
+| `+0x2C` | immutable stream base |
+| `+0x30` | current read pointer |
+| `+0x34` | control-flow handler already consumed the following delta |
+| `+0x38` | running status |
+
+The authored clock is **480 ticks/second**: cue-open stores
+`advance = 480.0 / boot_rate`, hence `8.0` per NTSC 60 Hz callback and `9.6`
+per PAL 50 Hz callback. Each callback first adds `advance` to `elapsed`, then
+dispatches every event whose `delay <= elapsed`. After a normal event it reads
+the following VLQ delay and resets `elapsed = 0`; a zero-delay event therefore
+runs in the same callback. This is a relative-delay clock, unlike the BGM
+walker's running absolute MIDI-tick sum. Console dispatch is quantized to the
+sound callback grid; an exact renderer uses 100 output samples per SE tick at
+48 kHz. As with BGM, a renderer may normalize the arbitrary cue-open-to-callback
+phase so the first due event lands at sample zero.
+
+### 6.2 Event grammar
+
+`FUN_003fce80` treats a byte with bit 7 set as a new status and otherwise reuses
+the status at module `+0x38` (running status). It dispatches by `status >> 4`
+through the 16-entry table at **`0x0069e1a0`**. Only three handlers are live:
+
+| bytes | EE handler | meaning |
+|---|---|---|
+| `A0 note velocity program` | `FUN_003fd3d8` → driver `FUN_003f9d40` | custom SE note event; nonzero velocity starts `seprog[program]` at the positional `note`, velocity zero stops matching `(bank, program, note)` voices |
+| `B0 command ...` | `FUN_003fd488` | SE voice automation / stream control (below) |
+| `FF 2F 00` | `FUN_003fd8d0` | end layer: null read pointer, state `2`, emit the driver's `FF 3F 00` completion event |
+
+Every other high-nibble entry is the bare `jr ra` stub at `0x003fd3d0`.
+After every non-ending event comes a standard big-endian **VLQ relative delay**
+(`FUN_003fd318`: `value = value*128 + (byte&0x7F)` until bit 7 clears).
+
+`B0` always consumes `command` plus three parameter bytes. Commands `07`, `0A`,
+and `41` consume a fourth parameter byte:
+
+| command | parameters after command | EE-proven behavior |
+|---|---|---|
+| `01` | `value, program, note` | set LFO **depth** on active voices of this cue module matching program/note |
+| `02` | `value, program, note` | set LFO **rate** on the same selection |
+| `07` | `duration, target, program, note` | ramp note-on velocity (`voice+0x50`) on active voices of this VAB matching program/note |
+| `0A` | `duration, target, program, note` | ramp tone pan (`voice+0x5C`) on that selection |
+| `41` | `duration, signed_target, program, note` | pitch glide on that selection; target is signed tenths of a semitone, converted by `×1.2` into the driver's 1/12-semitone accumulator |
+| `60` | `target_lo, target_hi, count` | jump to `stream_base + u16le(target)`; `count=0` loops forever, otherwise jump while the per-layer counter differs from `count`, incrementing it after each jump |
+
+Commands `01/02/07/0A/41` are repacked as the driver's private `F0 00 7F/7E`
+messages, then applied by `FUN_003fb818`. The exact ramp formula read there is
+`step=(target-current)*(480/rate)/(duration*4)` for `07/0A`; command `41` uses
+`total=signed_target*1.2`, `step=total/(duration*4)`. Command `60` consumes its
+following VLQ before changing the read pointer, so the main walker does not read
+a second delta at the jump seam.
+
+### 6.3 Whole-corpus grammar gate
+
+Measured over all **2699 request streams** (including `space_c`, whose seseq is
+intact): **11,408 events** = 7,233 `A0`, 1,476 `B0`, and 2,699 `FF 2F 00`.
+The six and only six B commands are `01`×108, `02`×112, `07`×233, `0A`×16,
+`41`×915, `60`×92. Every event carries an explicit status even though the
+walker supports running status; every non-ending event carries an exactly
+two-byte VLQ (8,709/8,709), and zero is canonically encoded `80 00`
+(5,422/5,422). Delays span 0..6240 ticks. Of the 92 jumps, 91 use `count=0`
+(infinite) and one uses `count=1`; every jump's following delay is zero.
+
+### 6.4 Gameplay routing: `SeDesc` name → `(VAB, bank, req)`
+
+The game does not identify effects by an event-stream offset. Its separate
+`SeDesc` exdb tables map a gameplay name to the two indices consumed by
+`vab_get_seseq`. `FUN_001bc0bc` materializes each row as:
+
+| runtime offset | exdb field | absent-field default |
+|---|---|---|
+| `+0x00` | `name[32]` | `"noname"` |
+| `+0x20` | `loop[32]` | `"no"` |
+| `+0x40` | `reverb[32]` | `"system"` |
+| `+0x60` | `MaxDistance` (`f32`) | `500.0` |
+| `+0x64` | `MiniDistance` (`f32`) | `20.0` |
+| `+0x68` | `VolCurve` (`s32`) | `0` |
+| `+0x6C` | `bank` (`s32`) | `0` |
+| `+0x70` | `priority` (`s32`) | `10` |
+| `+0x74` | `req` (`s32`) | `0` |
+
+`FUN_0035b010` searches the loaded `SeDesc` owners by `name` and retains the
+owner of the matching row. `kick3D` `FUN_0035b258` then obtains that owner's
+loaded VAB id and calls `FUN_005b514c(vab, row.bank, row.req, ...)`. The runtime
+constructor `FUN_0035c7ec` forwards those first three words unchanged to
+`FUN_003fc3b0`/`FUN_003fc3c8`, hence:
+
+```
+gameplay name -> owner VAB
+               -> outer seseq index = SeDesc.bank
+               -> inner stream index = SeDesc.req
+```
+
+The field name `bank` therefore means the **outer index inside that VAB**, not
+the VAB id. `req` selects exactly one inner event stream. Concrete design-data
+rows corroborate the code: `arabian` outer 5 has requests 0/1/2 named
+`st_brk_rock01`, `st_brk_statue`, and `st_brk_plate`; outer 25 requests 0/1
+are `st_cpt_flyingcarpet_start` and `_loop`. The filename of a `SeDesc` table
+is not itself the VAB binding; the matched owner supplies the handle.
+
+For 3D triggers, `FUN_00363dc8` consumes the row's distance block. With
+`VolCurve == 0`, let `B = clamp(global_effect_volume * 128, 0, 128)` and `d`
+be listener distance:
+
+```
+d < MiniDistance                    -> B
+MiniDistance <= d <= MaxDistance    -> B * (1 - (d-Mini)/(Max-Mini))
+d > MaxDistance                     -> 0
+```
+
+A nonzero `VolCurve` bypasses that distance ramp and returns `B`. This matters
+for the only two nonzero rows in the US corpus: both use `0x7FFFFFFF` and carry
+NaN min/max values, which are consequently not evaluated. There is **no
+per-effect master-volume field** in `SeDesc`; `VolCurve` is a selector, not a
+gain. Direct SE-module volume is the requested byte multiplied by runtime/global
+effect gains and clamped to 0..127 (`FUN_0035c378`).
+
+The US corpus has 114 `SeDesc` tables / 4,262 rows. All present `loop` values
+are `"no"` (2,353), all present `reverb` values are `"system"` (2,353), and
+`priority` is 10 except three rows (100, 11, 12); omitted fields receive the
+defaults above. More importantly, all five call sites of `FUN_0035b010` were
+traced: the trigger paths read the distance block, `bank`, and `req`, while no
+consumer reads the row's `loop`, `reverb`, or `priority`. In this executable
+those three columns are retained design metadata, not playback controls.
+Sequence repetition is authored explicitly by `B0 60`; module reverb is
+controlled through the cue-open `0x10000` flag / system parameter path.
 
 ## 7. The other chunks, and the one corrupt bank
 
@@ -209,44 +346,72 @@ bank/req is part of the playback milestone.
   as the one known-corrupt bank and still codec-checks its `.bd` via the
   corrected slot.
 
-## 8. Runtime model (EE side, for context)
+## 8. Runtime and offline playback model
 
 The SE module shares the 48-voice SPU2 pool with BGM (round-robin, never steals;
-`sg2slotctrl.c`, `BGM.md` §M5). The note-on is **`FUN_003f8690`** — the "4-byte
-event" API that [`BGM.md`](BGM.md) §8 identified as *not* the BGM path; it is the
-SE path. It reads the same tone fields as BGM's note-on plus the three deltas in
-§5, allocates a voice, and sets it up through the same `FUN_003fe*` voice
-setters and the same IOP command executor (`sg2iopm1.irx`). **Cue sequencing,
-`SeDesc` consumption, and the event-stream grammar are the next milestone** —
-they are new driver surface and are being measured, not guessed, before any
-runtime library or player surface is built.
+`sg2slotctrl.c`, `BGM.md` §M5). Its note-on **`FUN_003f8690`** reads the shared
+tone fields plus §5's SE fields, then uses the same pitch, ADSR, pan, LFO, reverb,
+Gaussian interpolation, and integer SPU2 bus path documented in `BGM.md` §8.
+Tone flag `0x02` selects the SPU2 noise source instead of ADPCM and supplies the
+six-bit per-core noise clock from tone byte 2; the source is shared by each
+24-voice core, exactly as the SPU2 mixer exposes it.
+
+The offline `serender` harness drives this path through the native core:
+
+1. `ae3_synth_load_bank` recognizes the SE slot pattern and parses its positional
+   programs, seseq chunk, and optional LFO table.
+2. The harness-internal loader resolves exactly the `bank,request` Jam indices
+   from §6.4, validates the selected bytecode through `FF 2F 00`, and resets the
+   embedded walker.
+3. The render loop dispatches `A0`, every `B0` command, and `FF 2F 00` through
+   the shared synth. Exact mode uses 100 output samples per authored tick; console
+   mode reproduces the EE walker's per-delay 60 Hz quantization. Voice ramps
+   still step at the driver's 60 Hz flush cadence in both modes.
+
+The exported runtime API intentionally does **not** yet expose SE selection.
+That product surface is gated on a user listening comparison and a separate
+runtime/player decision. The offline harness contains no game data: callers
+provide their own `.hd`/`.bd` and may optionally provide extracted
+`sg2iopm1.irx` pitch data and `libsd.irx` STUDIO_C coefficients. One render
+selects one request; a `B0 60` infinite loop remains live until the render cap.
 
 ## 9. Tooling
 
 `ae3 se` (`ae3tools/se.py`):
 
 ```
-ae3 se BANK.hd                 # header, chunk table, programs, cue/layer counts
+ae3 se BANK.hd                 # header, chunks, programs, bank/request counts
 ae3 se --census DIR            # survey every .hd under DIR
-ae3 se BANK.hd --cues          # dump the cue -> layer -> event-stream structure
+ae3 se BANK.hd --cues          # dump bank -> request -> raw event streams
 ae3 se BANK.hd --decode -o DIR # decode every .bd waveform to WAV (44100 Hz mono)
+ae3 se BANK.hd --render 5:0 -o cue.wav \
+  --pitch-irx extracted/irx/sg2iopm1.irx \
+  --libsd extracted/irx/libsd.irx
 ```
 
-Gate `checks/check_se.py` (private): over all 101 banks, every referenced `.bd`
-waveform is decoded by both `se.decode_adpcm` and the `bgm.py` oracle and
-required to be **sample-identical incl. loop point** (2180 waveforms), plus the
-structural invariants of §§2–7 (drum-form programs, the end-flag address test,
-the two-level seseq with `FF 2F 00` termination, the constant unk chunk,
-`space_c` isolated). PASS on the whole corpus.
+`--render BANK:REQUEST` assembles one effect at 48 kHz stereo through the native
+core. Defaults are the faithful Gaussian resampler, exact event timing, caller
+volume 96/127, and a 10-second cap for looping bytecode. `--tick-events` selects
+the console's 60 Hz burst timing; `--bright` is the deliberately non-hardware
+Catmull-Rom A/B option.
+
+Private gate `checks/check_se.py`: all 101 banks, 2,180 referenced waveforms
+sample-identical to the independent BGM decoder including loop points; all
+structural invariants in §§2–7; and an independent full-bytecode parse pinned to
+the §6.3 event/command/VLQ/jump census. Public golden vectors add a hand-authored,
+zero-Sony-data SE bank whose render covers `A0`, all six `B0` commands, finite
+looping, cut-groups, LFO, noise, and both event-timing modes.
 
 ## 10. Provenance
 
 Format facts are read from `SCUS_975.01`: the parser `vab_set` `FUN_00402938`
 and the accessors `FUN_00402b18` (`vab_get_seseq`), `FUN_00402c68`
-(`vab_get_seprog`), `FUN_00402cf8` (`vab_get_prog`) in `sg2vab.c`; the SE note-on
-`FUN_003f8690` and the cut-group scan `FUN_003ff7f8`; the cue-open `FUN_003fc3c8`
-and `kick3D` `FUN_0035b258`. Source-file and function names are the sg2 library's
-own `.rodata` assert strings (`sg2vab.c` `0x727a60`, `vab_get_seseq` `0x727a70`,
-`vab_loadbybin_hd`/`_bd` `0x7140e8`/`0x714118`). Everything else is a census over
-the 101-bank US corpus. Function-level notes:
+(`vab_get_seprog`), `FUN_00402cf8` (`vab_get_prog`) in `sg2vab.c`; the SE walker
+`FUN_003fce80` and handlers `FUN_003fd3d8`/`FUN_003fd488`/`FUN_003fd8d0`; the
+SE note-on `FUN_003f8690`, cut-group scan `FUN_003ff7f8`, cue-open
+`FUN_003fc3c8`, `kick3D` `FUN_0035b258`, and SeDesc row loader
+`FUN_001bc0bc`. Source-file and function names are the sg2 library's own
+`.rodata` assert strings (`sg2vab.c` `0x727a60`, `vab_get_seseq` `0x727a70`,
+`vab_loadbybin_hd`/`_bd` `0x7140e8`/`0x714118`). Everything else is a census
+over the 101-bank US corpus. Function-level notes:
 `decomp/functions_bgm/se/NOTES.md` (private repo).

@@ -9,7 +9,7 @@
 /* Tone record, 16 bytes in the .hd (docs/formats/BGM.md).
  * Byte 10 is read by nothing in the game and is not stored. */
 typedef struct {
-    uint8_t  lo, hi;      /* key window (drums: key = position, bytes 0/1 are zero) */
+    uint8_t  lo, hi;      /* BGM key window; SE: byte 0 cut-group, byte 1 voice-init */
     uint8_t  root;
     int8_t   tune;        /* byte 3, SIGNED, 1/16 semitone (6.25 cents) -- NOT cents */
     uint16_t addr;        /* byte 4-5, SPU 8-byte units; *8 = offset in .bd; 0xFFFF silent */
@@ -19,6 +19,8 @@ typedef struct {
     uint8_t  bend_raw;    /* byte 13 unresolved: the note-on aborts on RAW 0xFF
                              (FUN_003facb8 checks pbVar18[0xd] BEFORE the 0x10 resolution) */
     uint8_t  lfo;         /* resolved: prog[5] if flags&0x40, else byte 14; 0x7F = none */
+    uint8_t  cut_group;   /* SE tone byte 0; 0 disables same-group voice cuts */
+    uint8_t  se_init;     /* SE byte 1; live metadata +0x18, no traced DSP consumer */
 } ae3_tone;
 
 /* tone flag bits (byte 15) */
@@ -26,7 +28,8 @@ typedef struct {
 #define AE3_TF_USE_PROG_LFO  0x40u
 #define AE3_TF_LFO_ON        0x20u
 #define AE3_TF_USE_PROG_BEND 0x10u
-#define AE3_TF_SE_ONLY       0x01u   /* inert for BGM */
+#define AE3_TF_SE_ONLY       0x01u   /* SE sets live command bit 4; no traced DSP use */
+#define AE3_TF_NOISE         0x02u   /* SE: SPU2 noise source instead of ADPCM */
 
 #define AE3_NO_SAMPLE 0xFFFFu
 
@@ -41,6 +44,7 @@ typedef struct {
 
 typedef struct {
     ae3_prog *progs;
+    bool      se;         /* SE drum-form bank (program chunk at header +0x24) */
     int       nprogs;     /* table slots, incl. absent ones */
     uint8_t  *bd;         /* owned copy of the raw PS-ADPCM body */
     size_t    bd_len;
@@ -55,6 +59,9 @@ typedef struct {
     uint8_t  *lfo;        /* NULL = chunk absent (61 of 62 banks) */
     size_t    lfo_len;
     int       nlfo;       /* entries (count field is the LAST INDEX, +1) */
+    uint8_t  *seseq;      /* owned +0x1C chunk copy, through the +0x20 chunk */
+    size_t    seseq_len;
+    int       nsebanks;    /* outer Jam table entries (count field is last index) */
 } ae3_bank;
 
 /* ---- voice: ADPCM decoder + ADSR envelope (voice.c) --------------------- */
@@ -89,7 +96,8 @@ bool ae3_adpcm_next(ae3_adpcm *d, int16_t *out);   /* false = one-shot ended */
 
 typedef struct ae3_voice ae3_voice;
 /* interp = the instance's 256-phase x 4-tap kernel (gaussian or bright) */
-bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4], int32_t *out);
+bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4],
+                    bool noise, int16_t noise_sample, int32_t *out);
 
 /* ---- voice slots: the driver's allocator (sg2slotctrl.c) -------------------
  *
@@ -166,6 +174,14 @@ struct ae3_voice {
     uint32_t lfo_depth;            /* cmd+0x84: CC1 DOUBLED (BGM pitch mode cmd[1]==1) */
     uint32_t lfo_phase;            /* cmd+0x88: 0..239, wraps to rate/2 */
     bool     lfo_on;               /* cmd bit 0x400 */
+    bool     se_voice;
+    uint8_t  se_prog, cut_group;
+    /* SE control automation, stepped by the driver's 60 Hz slot callback. Values
+     * are the command-state floats; the register-facing fields above remain ints. */
+    bool     vel_ramp_on, pan_ramp_on, glide_on;
+    float    vel_ramp, vel_target, vel_step;
+    float    pan_ramp, pan_target, pan_step;
+    float    glide, glide_target, glide_step;
 };
 
 /* gauss.c: the SPU2's 512-entry 4-tap interpolation table (psx-spx transcription),
@@ -325,12 +341,25 @@ typedef struct {
     bool       ended;
 } ae3_seq;
 
+/* Embedded SE sequence state. The stream is interpreted in place from bank.seseq;
+ * commands carry relative delays at 480 ticks/s (100 output samples per tick). */
+typedef struct {
+    const uint8_t *start, *p, *end;
+    uint64_t next_sample;
+    uint32_t jump_count;
+    uint32_t events;
+    bool active, ended;
+    uint8_t running;
+} ae3_seseq;
+
 /* ---- instance ---------------------------------------------------------- */
 
 struct ae3_synth {
     ae3_bank  bank;
     ae3_seq   seq;
     bool      have_bank, have_seq;
+    ae3_seseq se;
+    bool      have_se;
     uint64_t  pos;              /* absolute sample position on the 48 kHz clock */
     uint8_t   chan_prog[16];    /* last program change per channel */
     uint8_t   chan_bend[16];    /* pitch wheel MSB, 64 = centre */
@@ -355,6 +384,10 @@ struct ae3_synth {
                                    force drops (the game data never fills 48) */
     int       cursor;           /* allocator round-robin cursor (gp-0x7b1c; 0 at boot) */
     uint64_t  next_tick;        /* next update-tick sample (multiples of AE3_TICK_SAMPLES) */
+    /* SPU2 noise generator: one shared source and clock per 24-voice core. A
+     * noise-tone note-on rewrites its selected core's clock from tone byte 2. */
+    uint8_t   noise_clk[2];
+    uint32_t  noise_cnt[2], noise_out[2];
     /* M7 sequencer state (the SMF walker's, cc/NOTES.md §3-4). Loop bookkeeping is
      * in ORIGINAL tick space; tick_offset maps it to the unrolled "effective" ticks
      * every sample-position conversion uses (eff = ev.tick + tick_offset). */
@@ -394,6 +427,14 @@ struct ae3_synth {
 /* synth.c */
 int  ae3__fail(ae3_synth *s, const char *fmt, ...);
 void ae3__slot_flush(ae3_synth *s);   /* harness: tick until every slot frees */
+int  ae3__synth_load_se(ae3_synth *s, int bank, int request); /* offline harness */
+void ae3__se_tick(ae3_synth *s);
+void ae3__se_fire_due(ae3_synth *s);
+uint64_t ae3__se_next_sample(const ae3_synth *s);
+int  ae3__se_load(ae3_synth *s, int bank, int request);
+void ae3__note_on(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel);
+void ae3__note_off(ae3_synth *s, uint8_t ch, uint8_t key);
+void ae3__voice_refresh(ae3_synth *s, ae3_voice *v);
 /* bank.c */
 int  ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
                      const uint8_t *bd, size_t bd_len);

@@ -111,7 +111,8 @@ static void data_end(ae3_voice *v)
     v->env.wait = 0;
 }
 
-bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4], int32_t *out)
+bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4],
+                    bool noise, int16_t noise_sample, int32_t *out)
 {
     if (!v->active)
         return false;
@@ -155,8 +156,8 @@ bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4], int32_t *out)
         v->win[2] = v->win[3];
         v->win[3] = sn;
     }
-    *out = (acc * lvl) >> 15;      /* ADSR multiply, s16 range (psx-spx); the
-                                      mixer applies VOLL/VOLR the same way */
+    *out = ((noise ? noise_sample : acc) * lvl) >> 15; /* ADSR multiply; the mixer
+                                                          applies VOLL/VOLR */
     return true;
 }
 

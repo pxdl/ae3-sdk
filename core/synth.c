@@ -116,6 +116,7 @@ int ae3_synth_load_bank(ae3_synth *s, const void *hd, size_t hd_len,
 {
     ae3__bank_free(&s->bank);
     s->have_bank = false;
+    s->have_se = false;
     memset(s->voices, 0, sizeof s->voices);   /* voices reference the old bank body */
     s->st.prog_slots = s->st.progs_used = s->st.tones = 0;
     if (ae3__parse_bank(s, hd, hd_len, bd, bd_len)) {
@@ -125,11 +126,36 @@ int ae3_synth_load_bank(ae3_synth *s, const void *hd, size_t hd_len,
     s->have_bank = true;
     return 0;
 }
+int ae3__synth_load_se(ae3_synth *s, int bank, int request)
+{
+    ae3_stats bank_st = s->st;
+    ae3__seq_free(&s->seq);
+    s->have_seq = false;
+    s->have_se = false;
+    memset(&s->st, 0, sizeof s->st);
+    s->st.prog_slots = bank_st.prog_slots;
+    s->st.progs_used = bank_st.progs_used;
+    s->st.tones = bank_st.tones;
+    if (ae3__se_load(s, bank, request))
+        return -1;
+    s->have_se = true;
+    s->pos = 0;
+    s->next_tick = 0;
+    s->cursor = 0;
+    reset_channels(s);
+    memset(s->voices, 0, sizeof s->voices);
+    ae3__rev_reset(&s->rev);
+    s->wet_ever = false;
+    s->rev_tail_left = AE3_REV_TAIL_SAMPLES;
+    return 0;
+}
+
 
 int ae3_synth_load_seq(ae3_synth *s, const void *mid, size_t mid_len)
 {
     ae3_stats bank_st = s->st;
     ae3__seq_free(&s->seq);
+    s->have_se = false;
     s->have_seq = false;
     memset(&s->st, 0, sizeof s->st);
     s->st.prog_slots = bank_st.prog_slots;
@@ -211,6 +237,7 @@ static ae3_voice *alloc_voice(ae3_synth *s)
  * register each tick. */
 static void slot_tick(ae3_synth *s)
 {
+    ae3__se_tick(s);   /* SE voice ramps share this callback, before LFO/pitch flush */
     for (int i = 0; i < AE3_NVOICES; i++) {
         ae3_voice *v = &s->voices[i];
         if (!v->in_use)
@@ -220,10 +247,6 @@ static void slot_tick(ae3_synth *s)
             v->in_use = false;
             trace(s, 'F', i, v->ch, v->key);
             if (v->active) {
-                /* Freed while still audible: only a still-rising attack could do
-                 * this (level < 2 going up), which no corpus tone can (internal.h).
-                 * The hardware voice would keep playing unowned until the slot is
-                 * regranted; count it so a future data set screams. */
                 s->st.slots_freed_live++;
                 trace(s, 'Z', i, v->ch, v->key);
             }
@@ -242,9 +265,27 @@ static void set_voice_pitch(ae3_synth *s, ae3_voice *v)
         s->st.pitch_step_clamped++;
 }
 
+void ae3__voice_refresh(ae3_synth *s, ae3_voice *v)
+{
+    ae3__voice_regs(s->song_vol_l, s->song_vol_r, v->vvol, v->vel,
+                    v->cpan, v->tpan, &v->voll, &v->volr);
+}
+
 static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
                         const ae3_prog *p, const ae3_tone *t)
 {
+    if (s->bank.se && t->cut_group) {
+        for (int i = 0; i < AE3_NVOICES; i++) {
+            ae3_voice *old = &s->voices[i];
+            if (old->active && old->se_voice && old->cut_group == t->cut_group) {
+                /* FUN_003ff7f8 overwrites ADSR1/2 with (0,8), then keys off. */
+                old->env.a1 = 0;
+                old->env.a2 = 8;
+                old->released = true;
+                ae3_env_keyoff(&old->env);
+            }
+        }
+    }
     ae3_voice *v = alloc_voice(s);
     if (!v) {
         s->st.notes_dropped++;   /* FUN_00400b58 == -1: the driver aborts the whole
@@ -257,23 +298,28 @@ static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
     v->active = true;
     v->ch = ch;
     v->key = key;
-    v->vel = vel;                /* raw: the bank velocity curve is never consulted
-                                    (count 0 in all 62 banks; FUN_003f9bf0) */
+    v->vel = vel;                /* raw; the shipped velocity chunk is identity */
     v->tone = t;
+    v->se_voice = s->bank.se;
+    v->se_prog = ch;
+    v->cut_group = t->cut_group;
     ae3_adpcm_init(&v->dec, s->bank.bd, s->bank.bd_len, (uint32_t)t->addr * 8);
+    /* SE note-on FUN_003f8690's flag-0x02 branch sends command 5 mode 0 with
+     * (slot, tone byte 2). sg2iopm1 ev_set_core_attr maps slot/24 to
+     * SD_CORE_NOISE_CLK; libsd sceSdSetCoreAttr masks the value to six bits. */
+    if (s->bank.se && (t->flags & AE3_TF_NOISE))
+        s->noise_clk[(int)(v - s->voices) / 24] = t->root & 0x3f;
     ae3_env_keyon(&v->env, t->adsr1, t->adsr2);
     set_voice_pitch(s, v);
-    /* M9 LFO (FUN_003facb8's arm block, lfo/NOTES.md). Waveform: the bank chunk
-     * entry for the resolved index if the bank has one (the driver computes the
-     * pointer even for out-of-range indices -- garbage it never dereferences; we
-     * leave NULL), else the default triangle. Arming passes the CHANNEL CC2/CC1
-     * stores; tone flag 0x20 only forces the calls when both stores are zero,
-     * where they are no-ops -- the flag is behaviorally inert. */
+    /* LFO waveform: indexed Jam entry when the bank supplies one, otherwise the
+     * driver's computed default triangle. Sparse-table holes are kept NULL; the
+     * shipped hard-armed SE tones all resolve to live entries. */
     if (!s->bank.lfo) {
         v->lfo_tbl = s->lfo_tri;
     } else if (t->lfo < s->bank.nlfo) {
         const uint8_t *o = s->bank.lfo + 2 + (size_t)t->lfo * 2;
-        v->lfo_tbl = s->bank.lfo + (o[0] | o[1] << 8);
+        uint16_t off = (uint16_t)(o[0] | o[1] << 8);
+        v->lfo_tbl = off == 0xffff ? NULL : s->bank.lfo + off;
     } else {
         v->lfo_tbl = NULL;
     }
@@ -281,11 +327,14 @@ static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
         ae3__lfo_set_rate(v, s->chan_cc2[ch]);
         ae3__lfo_set_depth(v, s->chan_cc1[ch]);
     }
+    if (s->bank.se && (t->flags & AE3_TF_LFO_ON)) {
+        ae3__lfo_set_rate(v, 10);
+        ae3__lfo_set_depth(v, 127);
+    }
     v->cpan = (uint8_t)ae3__cpan_clamp(s->chan_cc10[ch]);
     v->tpan = (uint8_t)ae3__tpan_clamp(t->pan);
     v->vvol = ae3__vol_product(s->chan_cc7[ch], s->chan_cc11[ch], p->vol, t->vol);
-    ae3__voice_regs(s->song_vol_l, s->song_vol_r, v->vvol, v->vel, v->cpan, v->tpan,
-                    &v->voll, &v->volr);
+    ae3__voice_refresh(s, v);
     if (s->rev.on && (t->flags & AE3_TF_REVERB))
         s->wet_ever = true;    /* gates the post-song reverb tail */
     s->st.voices_started++;
@@ -304,7 +353,7 @@ static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
  * key - key0; melodic programs scan tones in table order, skip out-of-window tones,
  * and stop after the first match unless header bit 7 (stack) is set. A reached tone
  * whose RAW byte 13 is 0xFF aborts the whole note-on (silent sentinel). */
-static void note_on(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel)
+void ae3__note_on(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel)
 {
     if (!s->have_bank || s->chan_prog[ch] >= s->bank.nprogs)
         return;
@@ -339,7 +388,7 @@ static void note_on(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel)
     }
 }
 
-static void note_off(ae3_synth *s, uint8_t ch, uint8_t key)
+void ae3__note_off(ae3_synth *s, uint8_t ch, uint8_t key)
 {
     for (int i = 0; i < AE3_NVOICES; i++) {
         ae3_voice *v = &s->voices[i];
@@ -372,8 +421,7 @@ static void cc_refresh(ae3_synth *s, uint8_t ch)
                     would chase a stale header pointer; unreachable in the corpus) */
             v->vvol = ae3__vol_product(s->chan_cc7[ch], s->chan_cc11[ch],
                                        p->vol, v->tone->vol);
-        ae3__voice_regs(s->song_vol_l, s->song_vol_r, v->vvol, v->vel, v->cpan,
-                        v->tpan, &v->voll, &v->volr);
+        ae3__voice_refresh(s, v);
     }
 }
 
@@ -384,8 +432,7 @@ void ae3_synth_song_volume(ae3_synth *s, int l, int r)
     for (int i = 0; i < AE3_NVOICES; i++) {  /* like the driver's fade tick */
         ae3_voice *v = &s->voices[i];
         if (v->active)
-            ae3__voice_regs(l, r, v->vvol, v->vel, v->cpan, v->tpan,
-                            &v->voll, &v->volr);
+            ae3__voice_refresh(s, v);
     }
 }
 
@@ -517,8 +564,9 @@ static void dispatch(ae3_synth *s, const ae3_event *e)
     case AE3_EV_CH: {
         uint8_t ch = e->status & 0x0F;
         switch (e->status & 0xF0) {
-        case 0x90: e->b ? note_on(s, ch, e->a, e->b) : note_off(s, ch, e->a); break;
-        case 0x80: note_off(s, ch, e->a); break;
+        case 0x90: e->b ? ae3__note_on(s, ch, e->a, e->b)
+                        : ae3__note_off(s, ch, e->a); break;
+        case 0x80: ae3__note_off(s, ch, e->a); break;
         case 0xB0: control(s, ch, e->a, e->b); break;
         case 0xC0: s->chan_prog[ch] = e->a; break;
         case 0xE0: pitch_bend(s, ch, e->a, e->b); break;
@@ -532,14 +580,14 @@ static void dispatch(ae3_synth *s, const ae3_event *e)
 void ae3_synth_note_on(ae3_synth *s, int ch, int key, int vel)
 {
     if (vel > 0)
-        note_on(s, (uint8_t)ch, (uint8_t)key, (uint8_t)vel);
+        ae3__note_on(s, (uint8_t)ch, (uint8_t)key, (uint8_t)vel);
     else
-        note_off(s, (uint8_t)ch, (uint8_t)key);
+        ae3__note_off(s, (uint8_t)ch, (uint8_t)key);
 }
 
 void ae3_synth_note_off(ae3_synth *s, int ch, int key)
 {
-    note_off(s, (uint8_t)ch, (uint8_t)key);
+    ae3__note_off(s, (uint8_t)ch, (uint8_t)key);
 }
 
 void ae3_synth_program(ae3_synth *s, int ch, int prog)
@@ -558,6 +606,8 @@ static bool any_voice_active(const ae3_synth *s)
 bool ae3_synth_done(const ae3_synth *s)
 {
     if (s->have_seq && !s->seq.ended)
+        return false;
+    if (s->have_se && !s->se.ended)
         return false;
     if (any_voice_active(s))
         return false;
@@ -579,6 +629,30 @@ static int32_t bus_sat(int32_t m, uint32_t *peak, uint32_t *clipped)
     return m;
 }
 
+/* One sample of a core's shared SPU2 noise source. The six-bit clock controls
+ * both the integer period and its fractional correction; the feedback bit is
+ * XNOR parity over output bits 10,11,12,15. Return-before-step matches the SPU2
+ * mixer: voices read NoiseOut, then the core advances it for the next sample. */
+static int16_t noise_tick(ae3_synth *s, int core)
+{
+    static const uint8_t frac[4] = { 0, 84, 140, 180 };
+    uint32_t clk = s->noise_clk[core];
+    uint32_t level = (0x8000u >> (clk >> 2)) << 16;
+    uint32_t cnt = s->noise_cnt[core] + 0x10000u + frac[clk & 3];
+    int16_t out = (int16_t)s->noise_out[core];
+    if ((cnt & 0xffffu) >= 210u)
+        cnt += 0x10000u - frac[clk & 3];
+    while (cnt >= level) {
+        cnt -= level;
+        uint32_t x = s->noise_out[core];
+        uint32_t bit = 1u ^ ((x >> 10) & 1u) ^ ((x >> 11) & 1u)
+                          ^ ((x >> 12) & 1u) ^ ((x >> 15) & 1u);
+        s->noise_out[core] = (x << 1) | bit;
+    }
+    s->noise_cnt[core] = cnt;
+    return out;
+}
+
 /* Mix all live voices into n (<= AE3_MIX_CHUNK) frames, integer all the way in the
  * hardware's order and widths: gauss -> ADSR (>>15, inside voice_tick) -> voice
  * volume ((x * reg*2) >> 15; the register is the SPU2's /2 fixed-volume format) ->
@@ -595,20 +669,28 @@ static void mix(ae3_synth *s, float *out, int n)
 {
     int32_t acc[2 * AE3_MIX_CHUNK];
     int32_t wac[2 * AE3_MIX_CHUNK];
+    int16_t noise[2][AE3_MIX_CHUNK];
     bool rev = s->rev.on;
     memset(acc, 0, (size_t)n * 2 * sizeof(int32_t));
     if (rev)
         memset(wac, 0, (size_t)n * 2 * sizeof(int32_t));
+    for (int j = 0; j < n; j++) {
+        noise[0][j] = noise_tick(s, 0);
+        noise[1][j] = noise_tick(s, 1);
+    }
     for (int i = 0; i < AE3_NVOICES; i++) {
         ae3_voice *v = &s->voices[i];
         if (!v->active)
             continue;
         int32_t gl = v->voll << 1, gr = v->volr << 1;
         bool wet = rev && (v->tone->flags & AE3_TF_REVERB);
+        bool is_noise = v->se_voice && (v->tone->flags & AE3_TF_NOISE);
+        const int16_t *ns = noise[(int)(v - s->voices) / 24];
         for (int j = 0; j < n; j++) {
-            int32_t x;                     /* gauss x envelope, s16 range */
-            if (!ae3_voice_tick(v, (const int16_t (*)[4])s->interp, &x))
-                break;                     /* data ended or ENVX<2 reclaim */
+            int32_t x;
+            if (!ae3_voice_tick(v, (const int16_t (*)[4])s->interp,
+                                is_noise, ns[j], &x))
+                break;
             int32_t pl = (x * gl) >> 15, pr = (x * gr) >> 15;
             acc[2 * j] += pl;
             acc[2 * j + 1] += pr;
@@ -665,11 +747,13 @@ static void fire(ae3_synth *s)
 
 int ae3_synth_render(ae3_synth *s, float *out, int nframes)
 {
-    if (!s->have_seq && !s->have_bank)
+    if (!s->have_seq && !s->have_bank && !s->have_se)
         return ae3__fail(s, "nothing loaded");
     ae3_seq *q = &s->seq;
     int done = 0;
     while (done < nframes && !ae3_synth_done(s)) {
+        if (s->have_se)
+            ae3__se_fire_due(s);
         if (s->have_seq) {
             if (s->timing_exact) {
                 /* fire everything due at or before the current sample */
@@ -718,6 +802,12 @@ int ae3_synth_render(ae3_synth *s, float *out, int nframes)
             if ((double)n > gap)
                 n = (int)ceil(gap);
         }
+        if (s->have_se && !s->se.ended) {
+            uint64_t at = ae3__se_next_sample(s);
+            uint64_t gap = at > s->pos ? at - s->pos : 1;
+            if ((uint64_t)n > gap)
+                n = (int)gap;
+        }
         if ((uint64_t)n > s->next_tick - s->pos)
             n = (int)(s->next_tick - s->pos);
         mix(s, out + 2 * done, n);
@@ -727,7 +817,7 @@ int ae3_synth_render(ae3_synth *s, float *out, int nframes)
          * on silence until it has had AE3_REV_TAIL_SAMPLES to decay (block-
          * granular, so the exact tail length varies by caller buffer size) */
         if (s->rev.on && s->wet_ever && !any_voice_active(s) &&
-            (!s->have_seq || s->seq.ended))
+            (!s->have_seq || s->seq.ended) && (!s->have_se || s->se.ended))
             s->rev_tail_left -= (uint64_t)n < s->rev_tail_left ? (uint64_t)n
                                                                : s->rev_tail_left;
     }

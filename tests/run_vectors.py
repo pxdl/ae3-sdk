@@ -18,6 +18,7 @@ ROOT = os.path.dirname(HERE)
 VEC = os.path.join(HERE, "vectors")
 WAVDUMP = os.path.join(ROOT, "harness", "wavdump")
 EXSTDUMP = os.path.join(ROOT, "harness", "exstdump")
+SERENDER = os.path.join(ROOT, "harness", "serender")
 GOLDEN = os.path.join(HERE, "golden.sha256")
 
 # name -> extra wavdump args
@@ -36,6 +37,13 @@ RENDERS = {
 
 # vectors rendered against a bank other than vec.hd (all share vec.bd)
 BANKS = {"lfo": "vlfo.hd"}
+
+# Embedded-SE sequencer: exact 480 Hz and console 60 Hz dispatch. The synthetic
+# stream covers A0/B0 running status, every B0 command, a finite loop, and SPU2 noise.
+SE_RENDERS = {
+    "se_exact": [],
+    "se_tick": ["--tick-events"],
+}
 
 # EXST stream vectors through exstdump --decode, hashed as whole WAVs. The
 # wasm gate rebuilds the identical files through the AE3Exst binding, so the
@@ -61,7 +69,7 @@ def main():
     subprocess.run(["make", "-C", os.path.join(ROOT, "core")],
                    check=True, capture_output=True)
     subprocess.run(["make", "-C", os.path.join(ROOT, "harness"),
-                    "wavdump", "exstdump"],
+                    "wavdump", "exstdump", "serender"],
                    check=True, capture_output=True)
     subprocess.run([sys.executable, os.path.join(HERE, "make_vectors.py")],
                    check=True, capture_output=True)
@@ -75,6 +83,16 @@ def main():
                 [WAVDUMP, os.path.join(VEC, BANKS.get(name, "vec.hd")),
                  os.path.join(VEC, "vec.bd"),
                  os.path.join(VEC, mid + ".mid"), *extra, "-o", out],
+                check=True, capture_output=True)
+            with open(out, "rb") as f:
+                hashes[name] = hashlib.sha256(f.read()).hexdigest()
+
+        for name, extra in SE_RENDERS.items():
+            out = os.path.join(td, name + ".wav")
+            subprocess.run(
+                [SERENDER, "--seconds", "3", *extra, "-o", out,
+                 os.path.join(VEC, "vec_se.hd"), os.path.join(VEC, "vec.bd"),
+                 "0", "0"],
                 check=True, capture_output=True)
             with open(out, "rb") as f:
                 hashes[name] = hashlib.sha256(f.read()).hexdigest()

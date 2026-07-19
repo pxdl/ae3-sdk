@@ -165,11 +165,10 @@ void ae3__lfo_set_rate(ae3_voice *v, int p)
     v->lfo_on = r != 0 && v->lfo_depth != 0;
 }
 
-/* FUN_003feea8: depth, DOUBLED for BGM voices (pitch mode cmd[1]==1 -- every BGM
- * voice; the doubling makes BGM depth always even). Armed only if depth AND rate. */
+/* FUN_003feea8: pitch mode 1 (BGM) doubles depth; mode 2 (SE) does not. */
 void ae3__lfo_set_depth(ae3_voice *v, int p)
 {
-    v->lfo_depth = p != 0 ? (uint32_t)p << 1 : 0;
+    v->lfo_depth = p != 0 ? (uint32_t)p << (v->se_voice ? 0 : 1) : 0;
     v->lfo_on = v->lfo_depth != 0 && v->lfo_rate != 0;
 }
 

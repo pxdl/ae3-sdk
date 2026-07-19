@@ -208,7 +208,7 @@ debug/us/stage/<name>/      the levels — 168 of them
     area.luc / placeholder.plc / actionseq.asq / monkeydb.xml.sz / text.bin
 debug/us/sound/stream/      1158 .x  = EXST streamed audio ("EXtended STream")
 debug/us/sound/bgm/         192 = 70 stems: .hd + .bd + .mid   (see docs/formats/BGM.md)
-debug/us/sound/se/          202  (sound effects; likely the same bank format)
+debug/us/sound/se/          202 = 101 embedded-SE .hd + .bd banks  (see docs/formats/SE.md)
 debug/us/movie/             22 .str FMVs (861 MB) + sceneNN.bin/.sbt subtitle pairs
                                                           (see docs/formats/FMV.md)
 ```

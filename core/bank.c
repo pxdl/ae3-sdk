@@ -18,6 +18,7 @@ void ae3__bank_free(ae3_bank *b)
     free(b->progs);
     free(b->bd);
     free(b->waves);
+    free(b->seseq);
     free(b->lfo);
     memset(b, 0, sizeof *b);
 }
@@ -133,27 +134,38 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
     if (hd_len < 0x80)
         return ae3__fail(s, "hd too small: %zu bytes", hd_len);
     uint32_t hd_sz = rd32(hd), bd_sz = rd32(hd + 4), zero = rd32(hd + 8);
-    if (hd_sz != hd_len || zero != 0)
-        return ae3__fail(s, "size prefix: hd=%u vs %zu, pad=%u", hd_sz, hd_len, zero);
+    bool is_se = rd32(hd + 0x24) != UINT32_MAX;
+    size_t expected_hd = (size_t)hd_sz + (is_se ? 0x180u : 0u);
+    if (expected_hd != hd_len || zero != 0)
+        return ae3__fail(s, "size prefix: hd=%u%s vs %zu, pad=%u", hd_sz,
+                         is_se ? "+0x180" : "", hd_len, zero);
     if (bd_sz != bd_len)
         return ae3__fail(s, "prefix says bd=%u, real .bd is %zu", bd_sz, bd_len);
     if (memcmp(hd + 0x0C, "SShd", 4) != 0)
         return ae3__fail(s, "no SShd magic at 0x0C");
 
-    /* Six signed chunk offsets at 0x10; -1 = absent. The three SE chunks are -1 in all
-     * 62 music banks; only s_20_park has an LFO chunk (parsed below -- M9). */
+    /* Six signed chunk offsets at 0x10; -1 = absent. BGM uses +0x10 and leaves
+     * the three SE slots empty; SE uses +0x1C/+0x20/+0x24 and leaves +0x10 empty. */
     int32_t prog_off = (int32_t)rd32(hd + 0x10), vel_off = (int32_t)rd32(hd + 0x14);
     int32_t lfo_off = (int32_t)rd32(hd + 0x18);
     int32_t se_seq = (int32_t)rd32(hd + 0x1C), unk5 = (int32_t)rd32(hd + 0x20);
     int32_t se_prog = (int32_t)rd32(hd + 0x24);
-    if (prog_off != 0x80)
-        return ae3__fail(s, "program chunk at %#x, expected 0x80", prog_off);
-    if (se_seq != -1 || unk5 != -1 || se_prog != -1)
-        return ae3__fail(s, "unexpected SE chunks: %#x %#x %#x", se_seq, unk5, se_prog);
+    if (is_se) {
+        if (se_seq < 0 || unk5 <= se_seq || se_prog <= unk5)
+            return ae3__fail(s, "bad SE chunks: prog=%#x seq=%#x unk=%#x seprog=%#x",
+                             prog_off, se_seq, unk5, se_prog);
+    } else {
+        if (prog_off != 0x80)
+            return ae3__fail(s, "program chunk at %#x, expected 0x80", prog_off);
+        if (se_seq != -1 || unk5 != -1 || se_prog != -1)
+            return ae3__fail(s, "unexpected SE chunks: %#x %#x %#x",
+                             se_seq, unk5, se_prog);
+    }
     if (vel_off < 0 || (size_t)vel_off + 2 + 128 > hd_len)
         return ae3__fail(s, "velocity chunk at %#x out of range", vel_off);
 
-    size_t B = (size_t)prog_off;
+    bk->se = is_se;
+    size_t B = (size_t)(is_se ? se_prog : prog_off);
     /* Count field is the LAST INDEX, not the count (proof: the MIDI's highest
      * program number equals it exactly on p_7 / j_6 / s_25_jungle). */
     int nprog = rd16(hd + B) + 1;
@@ -173,8 +185,9 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         if (o == 0xFFFF)                       /* unused program slot */
             continue;
         size_t a = B + o;
-        /* end = next used slot's offset, or the velocity chunk for the last program */
-        size_t b = (size_t)vel_off;
+        /* end = next used slot, or the following chunk / EOF for the last slot */
+        size_t b = is_se && lfo_off > (int32_t)B ? (size_t)lfo_off
+                                                 : is_se ? hd_len : (size_t)vel_off;
         for (int j = i + 1; j < nprog; j++) {
             uint16_t oj = rd16(offs + j * 2);
             if (oj != 0xFFFF) { b = B + oj; break; }
@@ -192,12 +205,13 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         p->drum = h[0] == 0xFF;
         p->stack = !p->drum && (h[0] & 0x80);
         p->vol = h[1]; p->bend = h[4]; p->lfo = h[5]; p->key0 = h[6]; p->key1 = h[7];
+        if (is_se && !p->drum)
+            return ae3__fail(s, "SE prog %d is not positional drum-form", i);
         if (p->drum) {
-            /* One tone per key over bytes 6-7's range; verified on all 7 drum kits. */
             if (h[7] - h[6] + 1 != n)
-                return ae3__fail(s, "prog %d: drum keys %u-%u vs %d tones", i, h[6], h[7], n);
+                return ae3__fail(s, "prog %d: drum keys %u-%u vs %d tones",
+                                 i, h[6], h[7], n);
         } else if ((h[0] & 0x7F) != n - 1) {
-            /* & 0x7F, not GT4SoundTool's & 0x0F: 0x97 means 24 tones, bit 7 is a flag. */
             return ae3__fail(s, "prog %d: header %#x vs %d tones", i, h[0], n);
         }
 
@@ -209,8 +223,13 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
             const uint8_t *r = h + 8 + t * 16;
             ae3_tone *x = &p->tones[t];
             if (p->drum) {
-                /* Key comes from POSITION; a drum tone's own bytes 0/1 are zero. */
+                /* Drum/SE key comes from position. In SE bytes 0/1 are live voice
+                 * cut-group / init parameters rather than a melodic key window. */
                 x->lo = x->hi = (uint8_t)(h[6] + t);
+                if (is_se) {
+                    x->cut_group = r[0];
+                    x->se_init = r[1];
+                }
             } else {
                 x->lo = r[0]; x->hi = r[1];
             }
@@ -232,6 +251,27 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
     bk->vel_count = rd16(hd + vel_off);
     memcpy(bk->vel, hd + vel_off + 2, 128);
 
+    if (is_se) {
+        size_t S = (size_t)se_seq, send = (size_t)unk5;
+        if (send > hd_len || S + 4 > send)
+            return ae3__fail(s, "SE sequence chunk span %zu..%zu out of range", S, send);
+        int nb = (int16_t)rd16(hd + S) + 1;
+        if (nb < 1 || S + 2 + (size_t)nb * 2 > send)
+            return ae3__fail(s, "SE outer offset table overruns chunk");
+        uint16_t first = 0xffff;
+        for (int i = 0; i < nb && first == 0xffff; i++)
+            first = rd16(hd + S + 2 + (size_t)i * 2);
+        if (first != 2 + (unsigned)nb * 2)
+            return ae3__fail(s, "SE first live outer offset %#x != table size %#x",
+                             first, 2 + nb * 2);
+        bk->seseq_len = send - S;
+        bk->seseq = malloc(bk->seseq_len);
+        if (!bk->seseq)
+            return ae3__fail(s, "out of memory");
+        memcpy(bk->seseq, hd + S, bk->seseq_len);
+        bk->nsebanks = nb;
+    }
+
     /* LFO chunk (M9): same offset-table convention as the program chunk. Entries
      * are 120 B (pitch waveform + amplitude waveform), but only the 60-byte pitch
      * half must be in range -- s_20_park, the one bank with a chunk, is truncated
@@ -244,12 +284,15 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         int nlfo = (int16_t)rd16(hd + L) + 1;      /* count = LAST INDEX */
         if (nlfo < 1 || L + 2 + (size_t)nlfo * 2 > hd_len)
             return ae3__fail(s, "LFO offset table overruns hd");
-        if (rd16(hd + L + 2) != 2 + (unsigned)nlfo * 2)
-            return ae3__fail(s, "LFO first offset %#x != table size %#x",
-                             rd16(hd + L + 2), 2 + nlfo * 2);
+        uint16_t first = 0xffff;
+        for (int i = 0; i < nlfo && first == 0xffff; i++)
+            first = rd16(hd + L + 2 + (size_t)i * 2);
+        if (first != 2 + (unsigned)nlfo * 2)
+            return ae3__fail(s, "LFO first live offset %#x != table size %#x",
+                             first, 2 + nlfo * 2);
         for (int i = 0; i < nlfo; i++) {
             uint16_t o = rd16(hd + L + 2 + (size_t)i * 2);
-            if ((size_t)o + 60 > llen)
+            if (o != 0xffff && (size_t)o + 60 > llen)
                 return ae3__fail(s, "LFO entry %d at +%#x: pitch table overruns", i, o);
         }
         bk->lfo = malloc(llen);

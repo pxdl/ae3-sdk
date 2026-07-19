@@ -1,7 +1,7 @@
-/* ae3synth.h -- Ape Escape 3 native SPU2 BGM synth: public API.
+/* ae3synth.h -- Ape Escape 3 native SPU2 BGM/SE synth: public API.
  *
  * Pure, engine-agnostic C core: no engine dependency, builds and tests headless.
- * Format + driver ground truth: docs/formats/BGM.md.
+ * Format + driver ground truth: docs/formats/BGM.md and docs/formats/SE.md.
  *
  * LEGAL: consumes Sony's bank/sequence data at runtime; never embeds or redistributes it.
  */
@@ -222,11 +222,10 @@ void ae3_synth_set_loop(ae3_synth *s, int count);
  * phase between play() and the sound thread is arbitrary within one tick). */
 void ae3_synth_event_timing(ae3_synth *s, bool exact);
 
-/* Render interleaved stereo float at AE3_RATE, dispatching sequence events per
- * ae3_synth_event_timing. Returns frames written (short only at end of song);
- * 0 once the sequence has ended and no voices remain; -1 if nothing is loaded.
- * With a bank but no sequence loaded, renders exactly nframes (driven by the
- * direct-event API above). */
+/* Render interleaved stereo float at AE3_RATE, dispatching BGM or embedded SE
+ * events per ae3_synth_event_timing. Returns frames written (short only at end);
+ * 0 once the sequence and voices have ended; -1 if nothing is loaded.
+ * With a bank but no sequence selected, renders exactly nframes for direct events. */
 int ae3_synth_render(ae3_synth *s, float *out, int nframes);
 
 bool ae3_synth_done(const ae3_synth *s);

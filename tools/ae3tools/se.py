@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""SE (sound-effect) banks: inspect, census, decode waveforms to WAV.
+"""SE banks: inspect, census, decode raw waves, and render assembled requests.
 
-Format spec: docs/formats/SE.md. Every field below is provenanced there against
-the EE parser in SCUS_975.01: the SShd / "Jam" container (magic @+0x0C) shared
-with BGM (BGM.md); the bank parser `vab_set` FUN_00402938 (a 6-slot chunk table
-relocated in place to absolute pointers at bank+0x30..+0x44); `vab_get_seseq`
-FUN_00402b18 (the two-level sequence chunk); and the SE note-on FUN_003f8690
-(positional tone indexing, tone byte 0 = voice cut-group).
+Format and playback provenance: docs/formats/SE.md. The EE parser `vab_set`
+FUN_00402938 establishes the six-slot SShd container; `vab_get_seseq`
+FUN_00402b18 establishes the two-level sequence chunk; walker FUN_003fce80 and
+note-on FUN_003f8690 establish the embedded grammar, timing, positional programs,
+and SE voice behavior.
 
 An SE bank's instrument data is byte-compatible with a BGM bank -- the .bd is
-the same PS-ADPCM and the 16-byte tone record is identical -- but it carries its
-OWN little sequences (the seseq chunk) instead of a separate .mid, and every
-program is positional "drum-form" (header byte 0 = 0xFF): a cue plays a fixed
-key, not a melodic range, so the note-on selects tone `(note - key0)` directly.
+the same PS-ADPCM and the 16-byte tone record shares its synth fields -- but it
+carries its own bank/request streams instead of a separate .mid. `--render`
+passes one selected stream through the native shared SPU2 synth; no game data is
+compiled into the tool.
 """
 import argparse
 import struct
 import sys
+import subprocess
 import wave
 from pathlib import Path
 
@@ -232,20 +232,20 @@ def cmd_info(bank):
         if p is None:
             continue
         print(f"    prog {i}: keys {p['key0']}..{p['keyN']} ({len(p['tones'])} tones) vol {p['vol']}")
-    live = [c for c in bank["cues"] if c]
-    nl = sum(len(c) for c in live)
-    print(f"  cues: {len(live)} live / {len(bank['cues'])} slots, {nl} layers")
+    live = [x for x in bank["cues"] if x]
+    nr = sum(len(x) for x in live)
+    print(f"  sequence banks: {len(live)} live / {len(bank['cues'])} slots, {nr} requests")
 
 
 def cmd_cues(bank):
-    for ci, layers in enumerate(bank["cues"]):
-        if not layers:
+    for bi, requests in enumerate(bank["cues"]):
+        if not requests:
             continue
-        print(f"cue {ci}: {len(layers)} layer(s)")
-        for li, lyr in enumerate(layers):
-            b = lyr["bytes"]
+        print(f"bank {bi}: {len(requests)} request(s)")
+        for ri, req in enumerate(requests):
+            b = req["bytes"]
             head = " ".join(f"{x:02x}" for x in (b[:24] if b else []))
-            print(f"    layer {li} (+{lyr['off']:#05x}, {len(b) if b else '?'} B): {head}"
+            print(f"    request {ri} (+{req['off']:#05x}, {len(b) if b else '?'} B): {head}"
                   f"{' ...' if b and len(b) > 24 else ''}")
 
 
@@ -259,6 +259,31 @@ def cmd_decode(bank, body, outdir):
         _write_wav(outdir / f"{bank['name']}_{a:06x}.wav", pcm)
         n += 1
     print(f"{bank['name']}: {n} waveforms -> {outdir}")
+
+def cmd_render(hd, bank, request, out, seconds, volume, tick, bright, pitch_irx, libsd):
+    root = Path(__file__).resolve().parents[2]
+    harness = root / "harness"
+    exe = harness / "serender"
+    try:
+        subprocess.run(["make", "-C", str(harness), "serender"],
+                       check=True, stdout=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise SEError(f"cannot build native SE renderer: {e}") from e
+    cmd = [str(exe), "--seconds", str(seconds), "--volume", str(volume),
+           "-o", str(out)]
+    if tick:
+        cmd.append("--tick-events")
+    if bright:
+        cmd.append("--bright")
+    if pitch_irx:
+        cmd += ["--pitch-irx", str(pitch_irx)]
+    if libsd:
+        cmd += ["--libsd", str(libsd)]
+    cmd += [str(hd), str(hd.with_suffix(".bd")), str(bank), str(request)]
+    try:
+        subprocess.run(cmd, check=True)
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise SEError(f"native SE render failed: {e}") from e
 
 
 def cmd_census(root):
@@ -292,14 +317,47 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("paths", nargs="+", type=Path, help=".hd file(s), or a directory with --census")
     ap.add_argument("--census", action="store_true", help="survey all .hd under a directory")
-    ap.add_argument("--cues", action="store_true", help="dump the cue/layer/event structure")
-    ap.add_argument("--decode", action="store_true", help="decode every waveform to WAV")
-    ap.add_argument("-o", "--out", type=Path, help="output directory for --decode")
+    ap.add_argument("--cues", action="store_true", help="dump sequence bank/request bytecode")
+    ap.add_argument("--decode", action="store_true", help="decode every raw waveform to WAV")
+    ap.add_argument("--render", metavar="BANK:REQUEST",
+                    help="assemble one embedded request through the native SPU2 synth")
+    ap.add_argument("-o", "--out", type=Path, help="output directory (--decode) or WAV (--render)")
+    ap.add_argument("--seconds", type=int, default=10,
+                    help="render cap for looping effects (default: 10)")
+    ap.add_argument("--volume", type=int, default=96, metavar="0..127",
+                    help="driver volume for audition (default: 96; gameplay gain is caller-owned)")
+    ap.add_argument("--tick-events", action="store_true",
+                    help="console-faithful 60 Hz event bursts (default: exact timing)")
+    ap.add_argument("--bright", action="store_true",
+                    help="non-hardware bright resampler (default: SPU2 gaussian)")
+    ap.add_argument("--pitch-irx", type=Path, help="optional sg2iopm1.irx pitch-table donor")
+    ap.add_argument("--libsd", type=Path, help="optional libsd.irx STUDIO_C reverb donor")
     a = ap.parse_args(argv)
 
     if a.census:
         for root in a.paths:
             cmd_census(root)
+        return 0
+
+    if a.render:
+        if len(a.paths) != 1:
+            ap.error("--render takes exactly one .hd path")
+        try:
+            bank_s, request_s = a.render.split(":", 1)
+            bank_i, request_i = int(bank_s, 0), int(request_s, 0)
+        except ValueError:
+            ap.error("--render must be BANK:REQUEST (decimal or 0x-prefixed)")
+        if a.seconds < 1 or not 0 <= a.volume <= 127:
+            ap.error("--seconds must be positive and --volume must be 0..127")
+        p = a.paths[0]
+        try:
+            cmd_render(p, bank_i, request_i,
+                       a.out or Path(f"{p.stem}_b{bank_i}_r{request_i}.wav"),
+                       a.seconds, a.volume, a.tick_events, a.bright,
+                       a.pitch_irx, a.libsd)
+        except SEError as e:
+            print("error:", e, file=sys.stderr)
+            return 1
         return 0
 
     for p in a.paths:

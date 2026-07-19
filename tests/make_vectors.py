@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Author the synthetic golden-vector assets (hand-made, zero Sony bytes).
 
-Emits into tests/vectors/: one micro bank (vec.hd + vec.bd) and five format-0
-MIDIs exercising the seams the corpus gates cover privately: loop seam, drum
-kit, pitch bend, reverb flag, ADSR edges. Deterministic output: same script,
-same bytes, forever — the golden hashes in golden.sha256 pin the renders.
+Emits into tests/vectors/: micro BGM and embedded-SE banks, format-0 MIDIs,
+and EXST streams exercising the seams the corpus gates cover privately.
+Deterministic output: same script, same bytes, forever — golden.sha256 pins
+the renders.
 
 Renders run with no IRX donors: nearest-ET pitch table, pure-dry mix.
 """
@@ -115,6 +115,41 @@ def bank_hd(progs, bd_len, lfo=None):
     return hd
 
 
+def se_tone(cut, init, root, addr, adsr1, adsr2, vol=127, pan=64, bend=0,
+            lfo=0, flags=0, tune=0):
+    return struct.pack("<BBBbHHH", cut, init, root, tune, addr, adsr1, adsr2) + \
+        bytes((0, vol, pan, bend, lfo, flags))
+
+
+def se_bank_hd(stream, bd_len):
+    """One synthetic two-level seseq bank and one 27-key positional program."""
+    tones = [
+        se_tone(1, 10, 60, ADDR_LOOPED, A1_FAST_FULL, A2_LIN_HOLD),
+        se_tone(1, 10, 51, ADDR_LOOPED, A1_FAST_FULL, A2_LIN_HOLD, flags=0x02),
+    ]
+    tones += [
+        se_tone(0, 10, 60, ADDR_LOOPED, A1_FAST_FULL, A2_LIN_HOLD)
+        for _ in range(25)
+    ]
+    seprog = struct.pack("<HH", 0, 4) + prog(0xFF, tones, key0=60, key1=86)
+    # Both offset levels are seseq-base-relative: outer[0] -> inner at +4,
+    # inner[0] -> the selected stream at +8.
+    seseq = struct.pack("<HHHH", 0, 4, 0, 8) + stream
+    vel_off = 0x80
+    seq_off = vel_off + 2 + 128
+    unk = bytes(4)
+    unk_off = seq_off + len(seseq)
+    seprog_off = unk_off + len(unk)
+    hd_len = seprog_off + len(seprog)
+    hd = struct.pack("<III", hd_len - 0x180, bd_len, 0) + b"SShd"
+    hd += struct.pack("<iiiiii", -1, vel_off, -1, seq_off, unk_off, seprog_off)
+    hd += bytes(0x80 - len(hd))
+    hd += struct.pack("<H", 127) + bytes(range(128))
+    hd += seseq + unk + seprog
+    assert len(hd) == hd_len
+    return hd
+
+
 # ------------------------------------------------------------- LFO bank (M9)
 # A second bank carrying an LFO chunk (docs/formats/BGM.md "LFO"): two 120-byte
 # entries, each a 60-byte pitch waveform + a 60-byte amplitude half (unread by
@@ -217,6 +252,23 @@ def vlq(n):
         n >>= 7
         out.append((n & 0x7F) | 0x80)
     return bytes(reversed(out))
+
+
+def se_stream():
+    """All seseq command widths, running status, VLQs, and a finite B0 60 loop."""
+    out = bytearray()
+    out += bytes((0xA0, 60, 100, 0)) + vlq(12)
+    out += bytes((60, 0, 0)) + vlq(4)                 # running A0: note-off
+    out += bytes((0xA0, 61, 127, 0)) + vlq(0)        # noise tone, clock 51
+    out += bytes((0xB0, 1, 40, 0, 61)) + vlq(0)      # LFO depth
+    out += bytes((2, 100, 0, 61)) + vlq(0)           # running B0: LFO rate
+    out += bytes((7, 4, 72, 0, 61)) + vlq(8)         # velocity automation
+    out += bytes((10, 4, 96, 0, 61)) + vlq(8)        # pan automation
+    out += bytes((0x41, 4, 0xF6, 0, 61)) + vlq(8)    # glide to -1 semitone
+    out += bytes((0xA0, 61, 0, 0)) + vlq(0)
+    out += bytes((0xB0, 0x60, 0, 0, 2)) + vlq(16)    # replay stream twice
+    out += b"\xff\x2f\x00"
+    return bytes(out)
 
 
 def smf(events, ppqn=480):
@@ -331,6 +383,9 @@ def main():
     hd_lfo = bank_hd(PROGS_LFO, len(BD), lfo=[LFO_RAMP, LFO_SQUARE])
     with open(os.path.join(OUT, "vlfo.hd"), "wb") as f:
         f.write(hd_lfo)                        # shares vec.bd
+    hd_se = se_bank_hd(se_stream(), len(BD))
+    with open(os.path.join(OUT, "vec_se.hd"), "wb") as f:
+        f.write(hd_se)                         # shares vec.bd
     for name, data in MIDIS.items():
         with open(os.path.join(OUT, name + ".mid"), "wb") as f:
             f.write(data)
@@ -338,9 +393,9 @@ def main():
         f.write(X_MONO)
     with open(os.path.join(OUT, "vec_stereo.x"), "wb") as f:
         f.write(X_STEREO)
-    print(f"vec.hd {len(hd)}B  vlfo.hd {len(hd_lfo)}B  vec.bd {len(BD)}B  "
-          f"vec_mono.x {len(X_MONO)}B  vec_stereo.x {len(X_STEREO)}B  "
-          f"+ {len(MIDIS)} midis -> {OUT}")
+    print(f"vec.hd {len(hd)}B  vlfo.hd {len(hd_lfo)}B  vec_se.hd {len(hd_se)}B  "
+          f"vec.bd {len(BD)}B  vec_mono.x {len(X_MONO)}B  "
+          f"vec_stereo.x {len(X_STEREO)}B  + {len(MIDIS)} midis -> {OUT}")
 
 
 if __name__ == "__main__":
