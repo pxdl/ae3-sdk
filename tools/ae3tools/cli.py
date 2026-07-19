@@ -22,6 +22,7 @@ COMMANDS = {
     "i3manim":      ("i3manim",      "I3D_I3M animation evaluator + bone name table"),
     "render":       ("i3drender",    "software-render a model/animation turntable (needs Pillow)"),
     "tm2":          ("tm2",          "TIM2 textures -> PNG (needs Pillow)"),
+    "exst":         ("exst",         "EXST .x streamed ADPCM: inspect / census / decode to WAV"),
     "strextract":   ("strextract",   "demux FMV .str streams from DATA.BIN (.m2v + .wav)"),
     "sbt2srt":      ("sbt2srt",      "FMV subtitles (.sbt) -> .srt"),
     "fmv2mp4":      ("fmv2mp4",      "extracted .m2v+.wav pairs -> playable .mp4 (needs ffmpeg)"),
