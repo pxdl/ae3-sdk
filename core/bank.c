@@ -18,6 +18,7 @@ void ae3__bank_free(ae3_bank *b)
     free(b->progs);
     free(b->bd);
     free(b->waves);
+    free(b->lfo);
     memset(b, 0, sizeof *b);
 }
 
@@ -140,8 +141,9 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         return ae3__fail(s, "no SShd magic at 0x0C");
 
     /* Six signed chunk offsets at 0x10; -1 = absent. The three SE chunks are -1 in all
-     * 62 music banks; only s_20_park has an LFO chunk (not parsed yet -- milestone 9). */
+     * 62 music banks; only s_20_park has an LFO chunk (parsed below -- M9). */
     int32_t prog_off = (int32_t)rd32(hd + 0x10), vel_off = (int32_t)rd32(hd + 0x14);
+    int32_t lfo_off = (int32_t)rd32(hd + 0x18);
     int32_t se_seq = (int32_t)rd32(hd + 0x1C), unk5 = (int32_t)rd32(hd + 0x20);
     int32_t se_prog = (int32_t)rd32(hd + 0x24);
     if (prog_off != 0x80)
@@ -229,6 +231,34 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
 
     bk->vel_count = rd16(hd + vel_off);
     memcpy(bk->vel, hd + vel_off + 2, 128);
+
+    /* LFO chunk (M9): same offset-table convention as the program chunk. Entries
+     * are 120 B (pitch waveform + amplitude waveform), but only the 60-byte pitch
+     * half must be in range -- s_20_park, the one bank with a chunk, is truncated
+     * by EOF 56 bytes into its amplitude half, and nothing in BGM reads it
+     * (docs/formats/BGM.md "LFO"). */
+    if (lfo_off != -1) {
+        if (lfo_off < 0 || (size_t)lfo_off + 4 > hd_len)
+            return ae3__fail(s, "LFO chunk at %#x out of range", lfo_off);
+        size_t L = (size_t)lfo_off, llen = hd_len - L;
+        int nlfo = (int16_t)rd16(hd + L) + 1;      /* count = LAST INDEX */
+        if (nlfo < 1 || L + 2 + (size_t)nlfo * 2 > hd_len)
+            return ae3__fail(s, "LFO offset table overruns hd");
+        if (rd16(hd + L + 2) != 2 + (unsigned)nlfo * 2)
+            return ae3__fail(s, "LFO first offset %#x != table size %#x",
+                             rd16(hd + L + 2), 2 + nlfo * 2);
+        for (int i = 0; i < nlfo; i++) {
+            uint16_t o = rd16(hd + L + 2 + (size_t)i * 2);
+            if ((size_t)o + 60 > llen)
+                return ae3__fail(s, "LFO entry %d at +%#x: pitch table overruns", i, o);
+        }
+        bk->lfo = malloc(llen);
+        if (!bk->lfo)
+            return ae3__fail(s, "out of memory");
+        memcpy(bk->lfo, hd + L, llen);
+        bk->lfo_len = llen;
+        bk->nlfo = nlfo;
+    }
 
     bk->bd = malloc(bd_len ? bd_len : 1);
     if (!bk->bd)

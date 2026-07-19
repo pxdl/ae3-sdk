@@ -415,11 +415,21 @@ walks every **active** voice on the channel calling `FUN_003feea8(voice, value)`
 | `FUN_003fedf8(v, p)` | **rate** = `240/(60 - p*58/127)` → `cmd+0x80` | **depth** (`cmd+0x84`) ≠ 0 |
 | `FUN_003feea8(v, p)` | **depth** → `cmd+0x84` | **rate** (`cmd+0x80`) ≠ 0 |
 
-The guard is symmetric: modulation needs **both** rate and depth. Only the
-note-on sets the rate, and only for `flags & 0x20` (passing `p=10` → rate 4,
-depth `0x7f`). **Exactly 2 of 3479 tones set flag 0x20**, and only ONE channel in
-the game (`s_20_park` ch4 — the one bank with an LFO table) ever has CC1 reach
-one. On the other 7 CC1 channels the modulation wheel does nothing on hardware.
+The guard is symmetric: modulation needs **both** rate and depth. The BGM
+note-on passes the **channel's CC2/CC1 stores** to the two setters whenever tone
+flag `0x20` is set *or* either store is nonzero — which makes flag `0x20`
+behaviorally inert (with zero stores the setters are no-ops; with nonzero stores
+both paths act identically). The rate setter also **zeroes the LFO phase and
+countdown**; the depth setter **doubles the value** for BGM voices (pitch mode
+`cmd[1]==1`, set at voice reset), so BGM depth is always even. The voice walk
+takes every *bound* voice of the channel, released-but-ringing included.
+
+Vibrato therefore arms on any channel that has seen both a nonzero CC2 and a
+nonzero CC1 — **four songs in the corpus**: `s_20_park` ch4 (rate 30, bend range
+6, the bank sine), `b_4_fast_brass_2` / `b_4_slow_brass` ch2 (rate 20, range 2,
+default triangle), `s_3_update` ch5 (rate 21, range 2, default triangle). Peak
+excursion is ±CC1·range/64 semitones. On the 3 CC1-only channels with no CC2
+(p_8_long, s_22, s_25_jungle) the modulation wheel does nothing on hardware.
 
 ### Reverb
 
@@ -430,10 +440,51 @@ Reverb is standing state, not a per-song knob. At EE `0x0035fa1c` the game sets
 = 0**; the only CCs the game ever sends are 1, 2, 6, 7, 8, 9, 10, 11, 66, 99. The
 one per-note reverb variable is tone flag `0x80` (reverb send on/off).
 
-### LFO table
+### LFO — the full model
 
-Parsed but only present on `s_20_park`. `flags & 0x40` selects `prog[5]` over
-`tone[14]` as the LFO index; both are `0x7f` (= none) in nearly all tones.
+The LFO runs on the **EE**, inside the driver's 60 Hz voice-command flush
+(`0x003ffc70`, dispatcher callback slot 3; the SMF walker is slot 0, so
+same-tick CC changes land before the flush). `sg2iopm1.irx` has no LFO code —
+the IOP just receives already-modulated pitch commands.
+
+**Waveform.** A 60-byte unsigned table, one entry per 4 phase units, nominal
+center 0x80. The bank's LFO chunk (header `+0x18`, same chunk convention as
+programs) holds 120-byte entries: 60 bytes **pitch** waveform + 60 bytes
+**amplitude** waveform (the amplitude half is never armed by anything in the
+BGM corpus, and `s_20_park`'s — the only bank with a chunk — is truncated by
+EOF after 4 bytes). At note-on, `idx = (flags & 0x40) ? prog[5] : tone[14]`;
+if the bank has a chunk the voice's table pointer is set to
+`chunk + u16_offsets[idx]` (even for idx `0x7f` — a garbage pointer that is
+harmless because such voices never arm). Without a chunk the voice keeps the
+**default triangle** in the game ELF (60 bytes at `0x0069e1e0` in
+SCUS_975.01: 0x80, +8/step to 0xF0 at [14], −8/step to 0x00 at [44], +8/step
+to 0x78 at [59]). `s_20_park`'s chunk entry 0 is a sine of the same shape
+class (0x80 → 0xFF@[14..15] → 0x00@[44] → 0x7F).
+
+**Rate** = `240/(60 − (p·58)/127)` (integer division; p = the CC2 value;
+p=0 → rate 0 = off). Setting the rate zeroes the phase and the tick
+countdown. **Depth** = CC1 value **doubled** (BGM pitch mode), 0 = off. The
+armed bit is re-evaluated at every setter call: armed ⇔ rate≠0 AND depth≠0.
+
+**Per 60 Hz tick, per armed voice** (after the age/free poll):
+
+```
+if countdown == 0:  countdown = 6                    (no phase advance)
+else:               countdown -= 1 ; phase += rate
+if phase >= 240:    phase = rate >> 1                (wrap)
+out = (tbl[phase >> 2] * depth) / 255 - ((depth + 1) >> 1) + 0x40
+```
+
+— so the phase advances 6 of every 7 ticks, and the first tick after arming
+is a reload tick. `out` **replaces the bend-wheel MSB** (wheel and LFO never
+add; while armed the wheel is ignored). The driver then converts bend to
+note+fine on the EE (`m = |out−64|·range; semis = m>>6;
+fine = ±((m>>2) − 16·semis)`) and sends the pitch command with
+`bendMSB=0x40, range=1` and the 4.12 multiplier still at unity `0x1000` —
+the vibrato goes through the **pitch-table index**, inheriting its
+16-steps-per-semitone quantization. Disarming (CC1→0) simply stops the
+sends: the voice keeps its last modulated pitch until a wheel event or its
+death — an authored-data-tolerated hardware quirk, reproduced faithfully.
 
 ### Open: tone flags bit 0
 

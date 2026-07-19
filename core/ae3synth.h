@@ -73,8 +73,8 @@ typedef struct {
     /* driver-side CC dispatch (table at EE 0x0069dea8, pinned M7 -- cc/NOTES.md).
      * Counters exist so a data set that exercises a path the corpus never touches
      * screams instead of silently diverging. */
-    uint32_t cc_lfo;            /* CC1 depth / CC2 rate stores (audible only on the
-                                   2 flag-0x20 tones; the LFO itself renders in M9) */
+    uint32_t cc_lfo;            /* CC1 depth / CC2 rate stores (M9: vibrato renders
+                                   on any channel with both nonzero -- 4 songs) */
     uint32_t cc_nrpn;           /* CC98/CC99 state stores reaching the DRIVER (the
                                    walker eats 20/30, so corpus: 0) */
     uint32_t cc6_shadow;        /* CC6 with NRPN (0|1, 0..3): shadow reverb config

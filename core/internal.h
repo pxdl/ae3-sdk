@@ -48,6 +48,13 @@ typedef struct {
     uint8_t   vel[128];   /* identity in all 62 banks; kept so a non-identity bank screams */
     ae3_waveform *waves;  /* introspection table: unique tone addrs, ascending */
     int       nwaves;
+    /* LFO chunk (header +0x18; only s_20_park has one). Owned copy of the whole
+     * chunk; entries are 120 B = 60 B pitch waveform + 60 B amplitude waveform
+     * (the amplitude half is unarmed by everything in BGM and s_20_park's is
+     * truncated by EOF, so only the pitch 60 B are validated in range). */
+    uint8_t  *lfo;        /* NULL = chunk absent (61 of 62 banks) */
+    size_t    lfo_len;
+    int       nlfo;       /* entries (count field is the LAST INDEX, +1) */
 } ae3_bank;
 
 /* ---- voice: ADPCM decoder + ADSR envelope (voice.c) --------------------- */
@@ -142,6 +149,19 @@ struct ae3_voice {
     int32_t  vvol;                 /* voice +0x44: CC7*CC11*prog[1]*tone[11]/127^3 */
     uint8_t  cpan, tpan;           /* voice +0x58/+0x5c, stored pre-clamped */
     uint16_t voll, volr;           /* the SPU2 registers (0..0x3FFF, /2 format) */
+    /* M9 LFO -- the driver's cmd+0x80..0x8C block (decomp/functions_bgm/lfo/
+     * NOTES.md). Armed (0x400) needs BOTH rate and depth nonzero; disarming just
+     * stops the per-tick pitch writes, leaving the last modulated pitch frozen
+     * (the driver quirk, reproduced). */
+    const uint8_t *lfo_tbl;        /* cmd+0x8C: 60-byte pitch waveform. NULL only for
+                                      chunk-present + out-of-range index, where the
+                                      driver stores a garbage pointer -- unreachable
+                                      armed in the corpus (triangle fallback if ever) */
+    uint32_t lfo_rate;             /* cmd+0x80 low 12 bits: 240/(60 - cc2*58/127) */
+    uint32_t lfo_count;            /* cmd+0x80 bits 12+: the 6-of-7 duty countdown */
+    uint32_t lfo_depth;            /* cmd+0x84: CC1 DOUBLED (BGM pitch mode cmd[1]==1) */
+    uint32_t lfo_phase;            /* cmd+0x88: 0..239, wraps to rate/2 */
+    bool     lfo_on;               /* cmd bit 0x400 */
 };
 
 /* gauss.c: the SPU2's 512-entry 4-tap interpolation table (psx-spx transcription),
@@ -232,6 +252,15 @@ void     ae3_pitch_tbl_et(uint16_t *tbl);
 int      ae3__load_pitch_irx(ae3_synth *s, const uint8_t *d, size_t len);
 uint16_t ae3__pitch_reg(ae3_synth *s, int note, int root, int fine, int bend_msb,
                         int range);
+/* M9 LFO (pitch.c; ground truth decomp/functions_bgm/lfo/NOTES.md). The default
+ * waveform is the canonical 60-step triangle -- computed, not copied; byte-identical
+ * to the game ELF's table at 0x0069e1e0 (private gate check_lfo verifies). */
+void     ae3__lfo_triangle(uint8_t tbl[60]);
+void     ae3__lfo_set_rate(ae3_voice *v, int p);    /* FUN_003fedf8: also zeroes
+                                                       phase + countdown */
+void     ae3__lfo_set_depth(ae3_voice *v, int p);   /* FUN_003feea8: doubles (BGM) */
+void     ae3__lfo_tick(ae3_synth *s, ae3_voice *v); /* the flush's 0x400 block +
+                                                       pitch send, one 60 Hz tick */
 
 /* ---- sequence ---------------------------------------------------------- */
 
@@ -322,6 +351,8 @@ struct ae3_synth {
      * false = catmull-rom "bright" (ae3_synth_gaussian; NOT hardware behavior). */
     int16_t   interp[256][4];
     bool      gaussian;
+    uint8_t   lfo_tri[60];      /* default LFO waveform (banks without a chunk):
+                                   the canonical triangle, == ELF 0x0069e1e0 */
     ae3_stats st;
     char      err[256];
 };

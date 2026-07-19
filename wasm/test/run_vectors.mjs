@@ -25,7 +25,11 @@ const RENDERS = {
     bend: {},
     reverb_flag: {},
     adsr_edges: {},
+    lfo: {},
 };
+
+/* vectors on a bank other than vec.hd (all share vec.bd); mirrors BANKS */
+const BANKS = { lfo: "vlfo.hd" };
 
 const gen = spawnSync("python3", [join(ROOT, "tests/make_vectors.py")]);
 if (gen.status !== 0) {
@@ -54,7 +58,8 @@ function judge(name, got) {
 
 for (const name of Object.keys(RENDERS).sort()) {
     const mid = readFileSync(join(VEC, (name.endsWith("_x2") ? name.slice(0, -3) : name) + ".mid"));
-    const { wav } = await renderWav({ wasmBytes, hd, bd, mid, ...RENDERS[name] });
+    const bankHd = BANKS[name] ? readFileSync(join(VEC, BANKS[name])) : hd;
+    const { wav } = await renderWav({ wasmBytes, hd: bankHd, bd, mid, ...RENDERS[name] });
     judge(name, createHash("sha256").update(wav).digest("hex"));
 }
 

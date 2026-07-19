@@ -87,8 +87,25 @@ static void dump(const ae3_synth *s, bool have_bank, bool have_seq)
         bool velid = true;
         for (int i = 0; i < 128; i++)
             if (b->vel[i] != i) velid = false;
-        printf("BANK slots=%d used=%u tones=%u velcount=%u velid=%d bd=%zu\n",
-               b->nprogs, s->st.progs_used, s->st.tones, b->vel_count, velid, b->bd_len);
+        printf("BANK slots=%d used=%u tones=%u velcount=%u velid=%d bd=%zu nlfo=%d\n",
+               b->nprogs, s->st.progs_used, s->st.tones, b->vel_count, velid, b->bd_len,
+               b->nlfo);
+        for (int i = 0; i < b->nlfo; i++) {           /* LFO chunk entries (M9) */
+            unsigned o = (unsigned)(b->lfo[2 + i * 2] | b->lfo[3 + i * 2] << 8);
+            size_t amp = b->lfo_len - o >= 120 ? 60 : b->lfo_len - o - 60;
+            printf("L i=%d off=%u amp=%zu pitch=", i, o, amp);
+            for (int k = 0; k < 60; k++)
+                printf("%02x", b->lfo[o + k]);
+            printf(" ampb=");
+            for (size_t k = 0; k < amp; k++)
+                printf("%02x", b->lfo[o + 60 + k]);
+            printf("\n");
+        }
+        printf("LFOTRI tri=");        /* the computed default; check_lfo diffs it
+                                         against the game ELF's 0x0069e1e0 bytes */
+        for (int k = 0; k < 60; k++)
+            printf("%02x", s->lfo_tri[k]);
+        printf("\n");
         for (int i = 0; i < b->nprogs; i++) {
             const ae3_prog *p = &b->progs[i];
             if (!p->present)

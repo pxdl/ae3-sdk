@@ -27,7 +27,11 @@ RENDERS = {
     "bend": [],
     "reverb_flag": [],
     "adsr_edges": [],
+    "lfo": [],
 }
+
+# vectors rendered against a bank other than vec.hd (all share vec.bd)
+BANKS = {"lfo": "vlfo.hd"}
 
 # stdout modes, hashed as text. "decode" gates the bank-introspection API:
 # wavdump --decode enumerates waveforms through it, cross-checks the table and
@@ -53,7 +57,8 @@ def main():
             mid = name[:-3] if name.endswith("_x2") else name
             out = os.path.join(td, name + ".wav")
             subprocess.run(
-                [WAVDUMP, os.path.join(VEC, "vec.hd"), os.path.join(VEC, "vec.bd"),
+                [WAVDUMP, os.path.join(VEC, BANKS.get(name, "vec.hd")),
+                 os.path.join(VEC, "vec.bd"),
                  os.path.join(VEC, mid + ".mid"), *extra, "-o", out],
                 check=True, capture_output=True)
             with open(out, "rb") as f:

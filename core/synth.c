@@ -65,6 +65,7 @@ ae3_synth *ae3_synth_new(void)
     ae3_synth *s = calloc(1, sizeof(ae3_synth));
     if (s) {
         ae3_pitch_tbl_et(s->pitch_tbl);   /* until ae3_synth_load_pitch_irx */
+        ae3__lfo_triangle(s->lfo_tri);    /* the driver's default LFO waveform */
         s->song_vol_l = s->song_vol_r = 127;   /* driver init (FUN_003f7f58) */
         s->nslots = AE3_NVOICES;
         s->gaussian = true;               /* the hardware kernel */
@@ -203,7 +204,10 @@ static ae3_voice *alloc_voice(ae3_synth *s)
 /* FUN_003ffc70 (update tick, callback #3): age every bound slot; from the tick where
  * age > 2, free it when the envelope reads below 2 -- the driver's ENVX<2 poll. The
  * envelope, not `active`, is the condition: a data-ended one-shot forced its envelope
- * to 0 (voice.c), which is exactly what the hardware ENVX would report. */
+ * to 0 (voice.c), which is exactly what the hardware ENVX would report. M9: the same
+ * per-voice pass runs the LFO for every armed voice that survived the poll (the
+ * flush's 0x400 block -- the free path jumps past it), overwriting the pitch
+ * register each tick. */
 static void slot_tick(ae3_synth *s)
 {
     for (int i = 0; i < AE3_NVOICES; i++) {
@@ -222,7 +226,10 @@ static void slot_tick(ae3_synth *s)
                 s->st.slots_freed_live++;
                 trace(s, 'Z', i, v->ch, v->key);
             }
+            continue;
         }
+        if (v->lfo_on)
+            ae3__lfo_tick(s, v);
     }
 }
 
@@ -255,6 +262,24 @@ static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
     ae3_adpcm_init(&v->dec, s->bank.bd, s->bank.bd_len, (uint32_t)t->addr * 8);
     ae3_env_keyon(&v->env, t->adsr1, t->adsr2);
     set_voice_pitch(s, v);
+    /* M9 LFO (FUN_003facb8's arm block, lfo/NOTES.md). Waveform: the bank chunk
+     * entry for the resolved index if the bank has one (the driver computes the
+     * pointer even for out-of-range indices -- garbage it never dereferences; we
+     * leave NULL), else the default triangle. Arming passes the CHANNEL CC2/CC1
+     * stores; tone flag 0x20 only forces the calls when both stores are zero,
+     * where they are no-ops -- the flag is behaviorally inert. */
+    if (!s->bank.lfo) {
+        v->lfo_tbl = s->lfo_tri;
+    } else if (t->lfo < s->bank.nlfo) {
+        const uint8_t *o = s->bank.lfo + 2 + (size_t)t->lfo * 2;
+        v->lfo_tbl = s->bank.lfo + (o[0] | o[1] << 8);
+    } else {
+        v->lfo_tbl = NULL;
+    }
+    if ((t->flags & AE3_TF_LFO_ON) || s->chan_cc2[ch] + s->chan_cc1[ch] != 0) {
+        ae3__lfo_set_rate(v, s->chan_cc2[ch]);
+        ae3__lfo_set_depth(v, s->chan_cc1[ch]);
+    }
     v->cpan = (uint8_t)ae3__cpan_clamp(s->chan_cc10[ch]);
     v->tpan = (uint8_t)ae3__tpan_clamp(t->pan);
     v->vvol = ae3__vol_product(s->chan_cc7[ch], s->chan_cc11[ch], p->vol, t->vol);
@@ -365,27 +390,34 @@ void ae3_synth_song_volume(ae3_synth *s, int l, int r)
 
 /* The driver's CC dispatch, mirrored from the 128-entry table at EE 0x0069dea8
  * (every handler decompiled from the game and pinned).
- * Corpus ledger: 7/10/11 audible (M4); 1/2 = LFO depth/rate stores (audible only on
- * the 2 flag-0x20 tones -- the LFO renders in M9, the state is kept now); 6/98/99 =
- * the NRPN machine (inert on this corpus: the walker eats CC99 20/30, so the NRPN
- * pair stays (0,0) and every CC6 lands in the never-applied reverb-type shadow);
- * 8/9/66 = the bare jr-ra stub. CC99 values 20/30, CC102 and CC90 never get here --
- * the SEQUENCER consumes them (seq.c reclassifies; see the loop events). */
+ * Corpus ledger: 7/10/11 audible (M4); 1/2 = LFO depth/rate (M9: audible on any
+ * channel with both nonzero -- s_20_park ch4, b_4_fast_brass_2/b_4_slow_brass ch2,
+ * s_3_update ch5; tone flag 0x20 is inert, decomp/functions_bgm/lfo/NOTES.md);
+ * 6/98/99 = the NRPN machine (inert on this corpus: the walker eats CC99 20/30, so
+ * the NRPN pair stays (0,0) and every CC6 lands in the never-applied reverb-type
+ * shadow); 8/9/66 = the bare jr-ra stub. CC99 values 20/30, CC102 and CC90 never
+ * get here -- the SEQUENCER consumes them (seq.c reclassifies; the loop events). */
 static void control(ae3_synth *s, uint8_t ch, uint8_t cc, uint8_t val)
 {
     switch (cc) {
     case 7:  s->chan_cc7[ch] = val; break;
     case 11: s->chan_cc11[ch] = val; break;
     case 10: s->chan_cc10[ch] = val; break;   /* raw; clamped 1..127 at use */
-    case 1:                    /* 0x3f9e40: depth store chan+0x304 + live-voice walk
-                                  (FUN_003feea8; engages only where rate != 0) */
+    case 1:                    /* 0x3f9e40: depth store chan+0x304, then walk every
+                                  BOUND voice (FUN_003fe108 collects on the slot
+                                  flag, so released-but-ringing ones included) */
         s->chan_cc1[ch] = val;
         s->st.cc_lfo++;
+        for (int i = 0; i < AE3_NVOICES; i++)
+            if (s->voices[i].in_use && s->voices[i].ch == ch)
+                ae3__lfo_set_depth(&s->voices[i], val);
         return;
-    case 2:                    /* 0x3f9ed8: rate store chan+0x300 + walk
-                                  (FUN_003fedf8; engages only where depth != 0) */
+    case 2:                    /* 0x3f9ed8: rate store chan+0x300 + the same walk */
         s->chan_cc2[ch] = val;
         s->st.cc_lfo++;
+        for (int i = 0; i < AE3_NVOICES; i++)
+            if (s->voices[i].in_use && s->voices[i].ch == ch)
+                ae3__lfo_set_rate(&s->voices[i], val);
         return;
     case 6: {                  /* 0x3fa100: NRPN data entry, dispatch on (msb,lsb) */
         s->chan_cc6[ch] = val;
@@ -434,8 +466,10 @@ static void pitch_bend(ae3_synth *s, uint8_t ch, uint8_t lsb, uint8_t msb)
     s->chan_bend[ch] = msb;
     for (int i = 0; i < AE3_NVOICES; i++) {
         ae3_voice *v = &s->voices[i];
-        if (v->active && v->ch == ch)
-            set_voice_pitch(s, v);
+        if (v->active && v->ch == ch && !v->lfo_on)
+            set_voice_pitch(s, v);   /* while the LFO is armed the flush overwrites
+                                        the wheel MSB every tick, so the wheel is
+                                        ignored (corpus never mixes the two) */
     }
 }
 

@@ -117,7 +117,104 @@ uint16_t ae3__pitch_reg(ae3_synth *s, int note, int root, int fine, int bend_msb
     uint32_t p = s->pitch_tbl[idx];
     p = note >= root ? p << q : p >> (q + 1);
     p = p * 441 / 480;
-    p = (p * 0x1000) >> 12;                       /* EE 4.12 multiplier: unity for BGM;
-                                                     LFO vibrato plugs in here (M9) */
+    p = (p * 0x1000) >> 12;                       /* EE 4.12 multiplier: unity ALWAYS --
+                                                     even under LFO. M9 pinned the real
+                                                     hook: vibrato arrives as note/fine
+                                                     offsets (ae3__lfo_tick below) */
     return (uint16_t)p;                           /* lhu truncation, as the IRX stores */
+}
+
+/* ---- M9: the driver LFO --------------------------------------------------------
+ *
+ * Ground truth: the EE-side voice flush FUN_003ffc70 (60 Hz dispatcher slot 3) and
+ * the rate/depth setters FUN_003fedf8/FUN_003feea8, raw-disassembly-verified;
+ * full spec in the private repo's decomp/functions_bgm/lfo/NOTES.md, condensed in
+ * docs/formats/BGM.md "LFO". There is NO LFO code in the IOP module: the flush
+ * replaces the bend-wheel MSB with the waveform sample, converts bend to note+fine
+ * on the EE (BGM pitch mode), and sends the pitch command with bendMSB=0x40,
+ * range=1, multiplier unity. So vibrato inherits the pitch table's 16-steps-per-
+ * semitone quantization and the 60 Hz tick grid -- both audible hardware facts.
+ *
+ * The waveform is a 60-byte unsigned table, one entry per 4 phase units. Banks
+ * with an LFO chunk supply their own (s_20_park: a sine); every other voice uses
+ * the driver's default triangle. The default is COMPUTED here -- it is the
+ * canonical triangle (peak 0xF0 at [14], trough 0x00 at [44], step 8), an
+ * arithmetic fact like the ET pitch fallback, and unlike that fallback it is
+ * byte-identical to the game ELF's table at 0x0069e1e0 (the private corpus gate
+ * diffs the two), so no ELF donor is needed. */
+
+void ae3__lfo_triangle(uint8_t tbl[60])
+{
+    for (int i = 0; i < 60; i++)
+        tbl[i] = (uint8_t)(i <= 14 ? 128 + 8 * i
+                         : i <= 44 ? 352 - 8 * i
+                                   : 8 * i - 352);
+}
+
+/* FUN_003fedf8: rate = 240/(60 - p*58/127), integer ops; p==0 disarms. Always
+ * zeroes the phase AND the 6-of-7 countdown (so the first tick after a rate set
+ * is a reload tick that does not advance). Armed only if rate AND depth. */
+void ae3__lfo_set_rate(ae3_voice *v, int p)
+{
+    uint32_t r = 0;
+    if (p != 0)
+        r = 240u / (uint32_t)(60 - (p * 58) / 127);
+    v->lfo_rate = r;
+    v->lfo_count = 0;
+    v->lfo_phase = 0;
+    v->lfo_on = r != 0 && v->lfo_depth != 0;
+}
+
+/* FUN_003feea8: depth, DOUBLED for BGM voices (pitch mode cmd[1]==1 -- every BGM
+ * voice; the doubling makes BGM depth always even). Armed only if depth AND rate. */
+void ae3__lfo_set_depth(ae3_voice *v, int p)
+{
+    v->lfo_depth = p != 0 ? (uint32_t)p << 1 : 0;
+    v->lfo_on = v->lfo_depth != 0 && v->lfo_rate != 0;
+}
+
+/* One 60 Hz tick of the flush's 0x400 block for an armed voice: advance the phase
+ * (6 of every 7 ticks), sample the waveform, and recompute the pitch register the
+ * way the flush's pitch send does. Runs every tick while armed -- when the LFO
+ * disarms nothing re-sends, so the voice keeps its last modulated pitch (the
+ * driver's freeze quirk; authored CC1 ramps end near zero so it is inaudible). */
+void ae3__lfo_tick(ae3_synth *s, ae3_voice *v)
+{
+    if (v->lfo_count == 0) {
+        v->lfo_count = 6;                     /* reload tick: no phase advance */
+    } else {
+        v->lfo_count--;
+        v->lfo_phase += v->lfo_rate;
+    }
+    uint32_t ph = v->lfo_phase;
+    if (ph >= 240)
+        ph = v->lfo_phase = v->lfo_rate >> 1; /* wrap lands at rate/2, not 0 */
+
+    const uint8_t *tbl = v->lfo_tbl ? v->lfo_tbl : s->lfo_tri;
+    /* NULL = chunk-present bank + out-of-range index, where the real driver reads
+     * a garbage pointer; no armed voice in the corpus has one (lfo/NOTES.md). */
+
+    int d = (int)v->lfo_depth;
+    int out = (int)(((uint32_t)tbl[ph >> 2] * (uint32_t)d) / 255u)
+            - ((d + 1) >> 1) + 0x40;          /* replaces the bend-wheel MSB */
+
+    /* the flush's BGM bend->note/fine conversion (raw asm 0x400330 / 0x4003f0):
+     * m>>6 semitones, the >>2 remainder in 1/16-semitone steps */
+    int range = v->tone->bend, semis, fine;
+    if (out >= 0x40) {
+        int m = (out - 0x40) * range;
+        semis = m >> 6;
+        fine  = (m >> 2) - (semis << 4);
+    } else {
+        int m = (0x40 - out) * range;
+        int mag = m >> 6;
+        semis = -mag;
+        fine  = (mag << 4) - (m >> 2);
+    }
+    /* sent as ev_set_pitch(root, note+semis, fine+that, 0x40, range=1, mult unity):
+     * bend term zero, so the wheel is ignored while armed */
+    v->pitch = ae3__pitch_reg(s, v->key + semis, v->tone->root,
+                              v->tone->tune + fine, 64, 1);
+    if (v->pitch > 0x3FFF)
+        s->st.pitch_step_clamped++;
 }
