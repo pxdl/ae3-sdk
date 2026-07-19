@@ -127,12 +127,25 @@ file actually contains (header value vs actual payload sectors):
 | `mgs_s07_14.x` | 1 | 24000 | 44 | 8 |
 | `phone_395_02.x` | 1 | 24000 | 64 | 28 |
 
-Most look like files re-authored shorter without a header update
-(`mgm_t01` is a plain off-by-one). The engine's stop condition is the
-header value, so on console these streams end on the read callback's
-behavior at EOF rather than the length field. Tools should treat the
-*actual* payload size (`(filesize - 0x78) & ~0x7FF`) as the trustworthy
-bound and surface the discrepancy.
+The mechanism is measurable *(corpus, 2026-07-19)*: **all 14 mono files
+overstate by exactly 36 sectors** (5.376 s at 24 kHz; only the two stereo
+music files differ — `mgm_d12` by 32, `mgm_t01` a plain off-by-one). The
+voice corpus is authored with a standard trailing silent tail of ~42
+sectors (median pad: `phone_` 42.0, `mgs_` 42.0, `c_` 41.5 — the ~6 s
+tails §2 describes), and **the only voice files with under 10 sectors of
+pad are exactly these 14** (4–7.5 each). So one authoring batch encoded
+these payloads with ~36 fewer sectors of trailing silence than the header
+field describes — the discrepancy sits entirely inside the silent tail,
+which is why it shipped: on console the engine (whose stop condition is
+the header value) hits EOF ~5.4 s early *during silence*, and nothing
+audible changes. Consistent with a late revision batch: 12 of the 13 bad
+`mgs_` files have `_a`/`_b` variant siblings with correct headers and
+standard pads, and `phone_395_02` is itself a variant slot beside a
+healthy `phone_395`. (Content language does not correlate: Japanese-language
+takes exist elsewhere in the US phone set with correct headers — the batch
+is mechanical, not a localization marker.) Tools should
+treat the *actual* payload size (`(filesize - 0x78) & ~0x7FF`) as the
+trustworthy bound and surface the discrepancy.
 
 ## 5. Tooling
 
