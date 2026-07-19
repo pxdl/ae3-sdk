@@ -427,7 +427,6 @@ struct ae3_synth {
 /* synth.c */
 int  ae3__fail(ae3_synth *s, const char *fmt, ...);
 void ae3__slot_flush(ae3_synth *s);   /* harness: tick until every slot frees */
-int  ae3__synth_load_se(ae3_synth *s, int bank, int request); /* offline harness */
 void ae3__se_tick(ae3_synth *s);
 void ae3__se_fire_due(ae3_synth *s);
 uint64_t ae3__se_next_sample(const ae3_synth *s);

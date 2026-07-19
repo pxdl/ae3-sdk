@@ -126,7 +126,7 @@ int ae3_synth_load_bank(ae3_synth *s, const void *hd, size_t hd_len,
     s->have_bank = true;
     return 0;
 }
-int ae3__synth_load_se(ae3_synth *s, int bank, int request)
+int ae3_synth_load_se(ae3_synth *s, int bank, int request)
 {
     ae3_stats bank_st = s->st;
     ae3__seq_free(&s->seq);

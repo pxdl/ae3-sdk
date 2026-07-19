@@ -79,7 +79,7 @@ int main(int argc, char **argv)
     uint8_t *hd = slurp(argv[a], &nh), *bd = slurp(argv[a + 1], &nb);
     ae3_synth *s = ae3_synth_new();
     if (!s) { fprintf(stderr, "out of memory\n"); return 1; }
-    if (ae3_synth_load_bank(s, hd, nh, bd, nb) || ae3__synth_load_se(s, bank, request)) {
+    if (ae3_synth_load_bank(s, hd, nh, bd, nb) || ae3_synth_load_se(s, bank, request)) {
         fprintf(stderr, "%s\n", ae3_synth_error(s)); return 1;
     }
     free(hd); free(bd);

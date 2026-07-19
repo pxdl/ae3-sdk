@@ -92,6 +92,27 @@ static bool table_entry(const uint8_t *base, size_t len, const uint8_t *table,
     return true;
 }
 
+int ae3_synth_se_banks(const ae3_synth *s)
+{
+    if (!s || !s->have_bank || !s->bank.se || !s->bank.seseq)
+        return 0;
+    return (int16_t)rd16(s->bank.seseq) + 1;
+}
+
+int ae3_synth_se_requests(const ae3_synth *s, int bank)
+{
+    if (!s || !s->have_bank || !s->bank.se || !s->bank.seseq)
+        return 0;
+    const uint8_t *inner;
+    if (!table_entry(s->bank.seseq, s->bank.seseq_len,
+                     s->bank.seseq, bank, &inner))
+        return 0;
+    if ((size_t)(inner - s->bank.seseq) + 2 > s->bank.seseq_len)
+        return 0;
+    int count = (int16_t)rd16(inner) + 1;
+    return count > 0 ? count : 0;
+}
+
 int ae3__se_load(ae3_synth *s, int bank, int request)
 {
     ae3_bank *bk = &s->bank;

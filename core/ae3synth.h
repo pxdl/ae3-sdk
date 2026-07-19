@@ -98,6 +98,17 @@ const char *ae3_synth_error(const ae3_synth *s);  /* last error; valid until nex
 int ae3_synth_load_bank(ae3_synth *s, const void *hd, size_t hd_len,
                         const void *bd, size_t bd_len);
 
+/* Select one embedded SE request from the loaded bank and reset playback to
+ * sample 0. `bank` is the outer seseq index; `request` is its inner index.
+ * Returns 0, or -1 with ae3_synth_error() set. */
+int ae3_synth_load_se(ae3_synth *s, int bank, int request);
+
+/* Embedded SE table shape for browsers/tools. Counts include positional table
+ * slots; an absent outer slot reports zero requests. Both return zero when the
+ * loaded bank has no SE sequence. */
+int ae3_synth_se_banks(const ae3_synth *s);
+int ae3_synth_se_requests(const ae3_synth *s, int bank);
+
 /* Load a sequence: standard MIDI file, format 0 (all 64 songs are). Resets playback
  * to sample 0. Returns 0, or -1 with ae3_synth_error() set. */
 int ae3_synth_load_seq(ae3_synth *s, const void *mid, size_t mid_len);

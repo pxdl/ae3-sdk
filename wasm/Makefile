@@ -18,7 +18,8 @@ SRCS = $(wildcard $(CORE)/*.c) abi.c
 # binding's staging buffers. (get_stats/voice/seq_event/clock cross via abi.c.)
 EXPORT_LIST = _malloc _free \
   _ae3_synth_new _ae3_synth_free _ae3_synth_error \
-  _ae3_synth_load_bank _ae3_synth_load_seq \
+  _ae3_synth_load_bank _ae3_synth_load_seq _ae3_synth_load_se \
+  _ae3_synth_se_banks _ae3_synth_se_requests \
   _ae3_synth_load_pitch_irx _ae3_synth_load_reverb_irx \
   _ae3_synth_gaussian _ae3_synth_reverb_depth \
   _ae3_synth_note_on _ae3_synth_note_off _ae3_synth_program \
