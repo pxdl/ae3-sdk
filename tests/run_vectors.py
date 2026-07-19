@@ -28,6 +28,9 @@ RENDERS = {
     "reverb_flag": [],
     "adsr_edges": [],
     "lfo": [],
+    # M8 cue layer: authored scale + both duck groups, overlapping windows
+    # (x0.49), ramps in both directions, edges on tick boundaries
+    "cue": ["--cue", "0.42", "--duck", "0:0.5:1.5", "--duck", "1:1.0:2.2"],
 }
 
 # vectors rendered against a bank other than vec.hd (all share vec.bd)

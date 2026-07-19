@@ -70,6 +70,7 @@ ae3_synth *ae3_synth_new(void)
         s->nslots = AE3_NVOICES;
         s->gaussian = true;               /* the hardware kernel */
         ae3__interp_build(s);
+        ae3__cue_init(&s->cue);           /* M8 cue layer; off until enabled */
         s->timing_exact = true;   /* user-settled dial (2026-07-16, memory
                                      project_ae3_bgm_findings): the console's tick
                                      bursts read as "notes are late / emulator
@@ -696,6 +697,8 @@ int ae3_synth_render(ae3_synth *s, float *out, int nframes)
          * sequencer is callbacks #0/#2 and the slot control #3, so a note-on landing
          * on a tick competes for slots before that tick frees any. */
         while (s->pos >= s->next_tick) {
+            ae3__cue_tick(s);   /* the game-frame side of the tick: duck lerp +
+                                   songvol recompute (no-op unless enabled) */
             slot_tick(s);
             s->next_tick += AE3_TICK_SAMPLES;
         }

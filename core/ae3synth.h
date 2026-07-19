@@ -144,6 +144,51 @@ void ae3_synth_program(ae3_synth *s, int ch, int prog);
  * voices immediately, like the driver's fade tick. */
 void ae3_synth_song_volume(ae3_synth *s, int l, int r);
 
+/* ---- cue layer (M8) -----------------------------------------------------------
+ * The game's volume model ABOVE the driver -- its C++ sound system, not the sg2
+ * driver (ground truth: decomp/functions_bgm/cue/NOTES.md, cc/NOTES.md §6, private
+ * repo). Per frame while a cue plays the game recomputes
+ *     songvol = trunc( (base/127) x slider x duck-product x dolby x volume_scale
+ *                      x 127 ),  clamped to 0..126
+ * and re-sends it to the driver as an absolute volume set; ducking is a game-side
+ * LINEAR-amplitude lerp of per-group floats (demo group, phone group) between 1.0
+ * and the ducked level, at |1.0 - level| / seconds per second -- the driver's own
+ * fade machinery is never used. Enabled here, that recompute runs on the render
+ * clock's 60 Hz tick grid (sample-accurate, no wall clock) and OWNS the song
+ * volume: it overwrites ae3_synth_song_volume state whenever the value changes.
+ * Disabled (the default) it never writes -- renders are untouched.
+ *
+ * Data facts from the disc (constants only; the databases stay private):
+ * volume_scale is per song, bgm_desc.exdb 0.28..0.56 (`ae3 songvol` prints it);
+ * duck level 0.7, crossfades 0.5 s in / 2.0 s out for both groups
+ * (sound_config.exdb); slider = the options bgm_volume float (menu 0..1.2, reset
+ * 0.7, common save 1.0); dolby = x0.6 in Dolby Pro Logic II output mode. The cue
+ * "base" volume is modelled at its ctor default (1.0 -> 127): nothing in the BGM
+ * path is pinned moving it. Duck state persists across ae3_synth_load_seq, like
+ * the game's manager -- a song started mid-cutscene starts ducked. */
+enum { AE3_DUCK_DEMO = 0, AE3_DUCK_PHONE = 1 };
+#define AE3_NDUCKS 2
+
+void ae3_synth_cue_enable(ae3_synth *s, bool on);          /* off: last value stays */
+void ae3_synth_cue_scale(ae3_synth *s, float volume_scale);/* bgm_desc; default 1.0 */
+void ae3_synth_cue_slider(ae3_synth *s, float bgm_volume); /* options; default 1.0 */
+void ae3_synth_cue_dolby(ae3_synth *s, bool on);           /* x0.6; default off */
+
+/* Hold/release a duck. The game re-asserts a flag every frame while the condition
+ * (cutscene, phone call) holds and the manager clears it after each step; held
+ * true is that assertion held. The ramp starts at the next 60 Hz tick. */
+void ae3_synth_cue_duck(ae3_synth *s, int which, bool active);
+
+/* Reconfigure a duck group (defaults: the disc's 0.7, 0.5 s, 2.0 s). Takes effect
+ * from the next tick; a change mid-ramp just retargets it, like the game would. */
+void ae3_synth_cue_duck_config(ae3_synth *s, int which,
+                               float level, float in_secs, float out_secs);
+
+/* Introspection: the last songvol the layer applied (-1 = none yet / disabled)
+ * and a group's current lerped level (1.0 when idle), for UI meters. */
+int   ae3_synth_cue_songvol(const ae3_synth *s);
+float ae3_synth_cue_duck_level(const ae3_synth *s, int which);
+
 /* Song looping, the sequencer's own mechanism (pinned M7 from the game's SMF walker,
  * FUN_00402108 / FUN_00400e80): CC99 val 20 marks
  * the loop start, CC99 val 30 the loop end; both are consumed by the walker and never

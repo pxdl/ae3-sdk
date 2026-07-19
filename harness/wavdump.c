@@ -8,6 +8,11 @@
  * .irx (the PITCH table, sg2iopm1.irx; the reverb's libsd.irx goes via --libsd).
  * --songvol sets the driver's song volume (default 127 = driver init; the game's
  * fade/volume API moves it -- see ae3_synth_song_volume).
+ * --cue SCALE enables the cue layer (M8: the game's volume model above the
+ * driver) at that bgm_desc volume_scale; it owns songvol from then on.
+ * --duck W:T0:T1 (repeatable x4, needs --cue) holds duck group W (0 demo,
+ * 1 phone) between the two sample times in seconds -- the 0.7x, 0.5 s in /
+ * 2.0 s out crossfades; edges land at their exact samples.
  * --libsd loads the SPU2 reverb preset (STUDIO_C depth 30, the boot pin) from the
  * extracted libsd.irx; without it renders are pure dry, bit-identical to pre-M6.
  * --rev-depth overrides the depth knob (0 = dry). --stems PREFIX (needs --libsd)
@@ -401,6 +406,9 @@ int main(int argc, char **argv)
     const char *libsd_path = NULL, *stems_prefix = NULL;
     double tail = 1.0;
     int songvol = 127;           /* driver init; see ae3_synth_song_volume */
+    double cue_scale = -1.0;     /* >= 0: enable the cue layer (owns songvol) */
+    struct { int which; uint64_t at_on, at_off; bool on_sent, off_sent; } ducks[4];
+    int nducks = 0;
     int rev_depth = -1;          /* -1 = leave the boot value (30) */
     int nslots = 0;              /* 0 = the real 48 */
     int loop = 0;                /* markers ignored; the console uses FOREVER */
@@ -452,6 +460,25 @@ int main(int argc, char **argv)
             tail = atof(argv[++i]);
         } else if (!strcmp(a, "--songvol") && i + 1 < argc) {
             songvol = atoi(argv[++i]);
+        } else if (!strcmp(a, "--cue") && i + 1 < argc) {
+            cue_scale = atof(argv[++i]);   /* bgm_desc volume_scale */
+        } else if (!strcmp(a, "--duck") && i + 1 < argc) {
+            /* W:T0:T1 -- hold duck group W (0 demo, 1 phone) between the two
+             * sample times (seconds); repeatable. Needs --cue. */
+            int w;
+            double t0, t1;
+            if (nducks == 4 ||
+                sscanf(argv[++i], "%d:%lf:%lf", &w, &t0, &t1) != 3 ||
+                w < 0 || w >= AE3_NDUCKS || t0 < 0 || t1 < t0) {
+                fprintf(stderr, "--duck wants W:T0:T1 (W 0..%d, 0 <= T0 <= T1; "
+                                "max 4)\n", AE3_NDUCKS - 1);
+                return 1;
+            }
+            ducks[nducks].which = w;
+            ducks[nducks].at_on = (uint64_t)llround(t0 * AE3_RATE);
+            ducks[nducks].at_off = (uint64_t)llround(t1 * AE3_RATE);
+            ducks[nducks].on_sent = ducks[nducks].off_sent = false;
+            nducks++;
         } else if (!strcmp(a, "--libsd") && i + 1 < argc) {
             libsd_path = argv[++i];
         } else if (!strcmp(a, "--rev-depth") && i + 1 < argc) {
@@ -535,6 +562,14 @@ int main(int argc, char **argv)
         return 1;
     }
     ae3_synth_song_volume(s, songvol, songvol);
+    if (nducks && cue_scale < 0) {
+        fprintf(stderr, "--duck needs --cue\n");
+        return 1;
+    }
+    if (cue_scale >= 0) {        /* the cue layer takes songvol ownership */
+        ae3_synth_cue_scale(s, (float)cue_scale);
+        ae3_synth_cue_enable(s, true);
+    }
     if (nslots)
         s->nslots = nslots;
 
@@ -644,7 +679,31 @@ int main(int argc, char **argv)
     int16_t pcm[BLOCK * 2];
     uint64_t frames = 0;
     for (;;) {
-        int n = ae3_synth_render(s, buf, BLOCK);
+        int want = BLOCK;
+        if (nducks) {
+            /* fire due duck edges, then cap the block at the next pending edge
+             * so each fires at its exact sample (render.mjs mirrors this) */
+            uint64_t pos = ae3_synth_pos(s), next = UINT64_MAX;
+            for (int d = 0; d < nducks; d++) {
+                if (!ducks[d].on_sent && pos >= ducks[d].at_on) {
+                    ae3_synth_cue_duck(s, ducks[d].which, true);
+                    ducks[d].on_sent = true;
+                }
+                if (ducks[d].on_sent && !ducks[d].off_sent &&
+                    pos >= ducks[d].at_off) {
+                    ae3_synth_cue_duck(s, ducks[d].which, false);
+                    ducks[d].off_sent = true;
+                }
+                if (!ducks[d].on_sent && ducks[d].at_on < next)
+                    next = ducks[d].at_on;
+                else if (ducks[d].on_sent && !ducks[d].off_sent &&
+                         ducks[d].at_off < next)
+                    next = ducks[d].at_off;
+            }
+            if (next != UINT64_MAX && (uint64_t)want > next - pos)
+                want = (int)(next - pos);
+        }
+        int n = ae3_synth_render(s, buf, want);
         if (n < 0) { fprintf(stderr, "render: %s\n", ae3_synth_error(s)); return 1; }
         if (n == 0)
             break;

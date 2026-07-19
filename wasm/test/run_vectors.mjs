@@ -26,6 +26,9 @@ const RENDERS = {
     reverb_flag: {},
     adsr_edges: {},
     lfo: {},
+    /* M8 cue layer -- mirrors run_vectors.py's --cue/--duck args */
+    cue: { cueScale: 0.42, ducks: [{ which: 0, t0: 0.5, t1: 1.5 },
+                                   { which: 1, t0: 1.0, t1: 2.2 }] },
 };
 
 /* vectors on a bank other than vec.hd (all share vec.bd); mirrors BANKS */

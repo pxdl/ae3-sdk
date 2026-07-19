@@ -209,6 +209,21 @@ MIDIS = {
         (1440, on(70)), (2300, off(70)),
         (2400, on(110)), (2500, off(110)),
     ]),
+    # M8 cue layer: three long sustain-hold notes (prog 1, looped waveform) so
+    # the duck crossfade staircase rides on steady tones. The duck schedule
+    # lives in the render args (the layer is runtime-API-driven, not
+    # sequence-driven): demo 0.5-1.5 s, phone 1.0-2.2 s -- ramps in both
+    # directions, the 0.49 double-duck overlap, and staggered releases, all on
+    # 800-sample tick boundaries.
+    "cue": smf([
+        (0, TEMPO_120), (0, bytes((0xC0, 1))),
+        (0, on(60)),
+        (480, on(64)),
+        (960, on(72)),
+        (2400, off(72)),
+        (2640, off(64)),
+        (2760, off(60)),
+    ]),
     # M9 LFO, on the vlfo bank: CC2 = rate (240/(60-p*58/127); 100 -> 16),
     # CC1 = depth. Covers: arming mid-note via the CC walk, a depth ramp,
     # disarm at CC1=0 (the freeze quirk -- pitch holds its last modulated

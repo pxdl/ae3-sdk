@@ -262,6 +262,34 @@ void     ae3__lfo_set_depth(ae3_voice *v, int p);   /* FUN_003feea8: doubles (BG
 void     ae3__lfo_tick(ae3_synth *s, ae3_voice *v); /* the flush's 0x400 block +
                                                        pitch send, one 60 Hz tick */
 
+/* ---- cue layer (cue.c) --------------------------------------------------
+ *
+ * The game's C++ volume layer above the driver (decomp/functions_bgm/cue/
+ * NOTES.md). One duck group mirrors the game's 0x18-byte group object; the
+ * game's per-frame assert byte becomes a held bool (equivalent: the game
+ * re-asserts every frame while the condition holds, the stepper clears it). */
+typedef struct {
+    float a, b;                /* +0x00 normal / +0x04 ducked target */
+    float cur;                 /* +0x08 current -- the product's factor */
+    bool  held;                /* +0x0c assert, held form */
+    float step_in, step_out;   /* +0x10/+0x14: |a-b|/secs per tick; the game
+                                  bakes the frame dt in at ctor time likewise */
+} ae3_duck;
+
+typedef struct {
+    bool     on;               /* false (default): the layer never writes */
+    float    scale;            /* bgm_desc volume_scale, default 1.0 */
+    float    slider;           /* options bgm_volume, default 1.0 */
+    bool     dolby;            /* x0.6 output-mode factor */
+    ae3_duck duck[AE3_NDUCKS]; /* demo (mgr+0x14), phone (mgr+0x18); the master
+                                  group (mgr+0x10) is A==B==1.0, never moves */
+    int      songvol;          /* last applied value; -1 = none yet */
+} ae3_cue;
+
+void ae3__cue_init(ae3_cue *c);          /* defaults (disc constants), off */
+void ae3__cue_tick(ae3_synth *s);        /* one 60 Hz step: lerp + recompute + apply */
+void ae3__cue_apply(ae3_synth *s);       /* recompute now, apply if changed */
+
 /* ---- sequence ---------------------------------------------------------- */
 
 /* Event record; kinds are the public AE3_EV_* (classification happens at parse
@@ -354,6 +382,7 @@ struct ae3_synth {
     bool      gaussian;
     uint8_t   lfo_tri[60];      /* default LFO waveform (banks without a chunk):
                                    the canonical triangle, == ELF 0x0069e1e0 */
+    ae3_cue   cue;              /* M8 game-layer volume model; inert until enabled */
     ae3_stats st;
     char      err[256];
 };

@@ -150,7 +150,8 @@ static void dtext(int x, int y, int sc, SDL_Color c, const char *fmt, ...)
 typedef struct {
     char name[64];              /* midi basename without .mid */
     char mid[64], hd[64], bd[64];
-    int  songvol;               /* authored: trunc(127 x volume_scale), slider 1.0 */
+    int   songvol;              /* authored: trunc(127 x volume_scale), slider 1.0 */
+    float vscale;               /* the raw volume_scale float (the cue layer's input) */
 } song_t;
 
 static song_t *Songs;
@@ -258,8 +259,12 @@ static int load_song_table(const char *exdb_path)
         snprintf(s->bd,  sizeof s->bd,  "%s", vb);
         snprintf(s->name, sizeof s->name, "%.*s", (int)(ml - 4), mid);
         s->songvol = (int)(127.0 * (double)vs);   /* the game's float trunc */
+        s->vscale = vs;
         if (s->songvol > 126) s->songvol = 126;
-        if (s->songvol < 1) s->songvol = 44;
+        if (s->songvol < 1) {                     /* corrupt record fallback (unseen) */
+            s->songvol = 44;
+            s->vscale = 44.5f / 127.0f;           /* mid-step: trunc-safe round trip */
+        }
     }
     free(d);
     qsort(Songs, NSongs, sizeof *Songs, song_cmp);
@@ -286,6 +291,11 @@ static struct {
     uint8_t *irx, *libsd; size_t irxn, libsdn;
     /* config mirrored into the synth */
     int songvol, authored, loop_on, exact, rev_depth, gaussian;
+    /* cue-layer demo (keys D/P): while on, the SDK's cue layer owns songvol --
+     * authored scale + the game's 0.7x / 0.5s / 2.0s duck crossfades. Manual
+     * volume keys (- = A) hand control back. */
+    int   cue_on, duck_demo, duck_phone;
+    float cue_scale;
     /* snapshot written each callback */
     uint64_t pos;
     ae3_voice_state vs[AE3_NVOICES];
@@ -400,6 +410,12 @@ static const struct { int head; const char *s; } HELP[] = {
 {0, "database. Sony mastered each song individually. At 127, dense songs overdrive the 16-bit"},
 {0, "mix bus; at authored levels only occasional transient peaks clip, and the real console"},
 {0, "clips those too. Use - and = to override, and A to return to the authored value."},
+{1, "DUCKING  (KEYS D P)"},
+{0, "During cutscenes and monkey-phone calls the game lowers music to 70 percent, fading down"},
+{0, "in half a second and back up in two. The fade is a linear ramp the game itself steps every"},
+{0, "frame; the sound driver just receives the new volume each tick. D holds the cutscene duck,"},
+{0, "P the phone duck, and both together multiply to 49 percent, exactly like the game. Either"},
+{0, "key arms the game's cue volume layer at the authored scale; - = A return to manual volume."},
 {1, "EXACT VS TICK CLOCK  (KEY T)"},
 {0, "The console's sequencer runs as a callback of the 60 HZ sound thread. Every MIDI event due"},
 {0, "within a tick fires in one burst, so event timing quantizes to a 16.7 MS grid. TICK"},
@@ -526,6 +542,12 @@ static int reload_locked(void)
     ae3_synth_gaussian(P.s, P.gaussian != 0);
     ae3_synth_set_loop(P.s, P.loop_on ? AE3_LOOP_FOREVER : 0);
     ae3_synth_song_volume(P.s, P.songvol, P.songvol);
+    if (P.cue_on) {   /* fresh instance: duck levels restart from 1.0 */
+        ae3_synth_cue_scale(P.s, P.cue_scale);
+        ae3_synth_cue_enable(P.s, true);
+        ae3_synth_cue_duck(P.s, AE3_DUCK_DEMO, P.duck_demo != 0);
+        ae3_synth_cue_duck(P.s, AE3_DUCK_PHONE, P.duck_phone != 0);
+    }
     P.finished = 0;
     P.pos = 0;
     P.seg_tick = 0; P.seg_sample = 0; P.spt = 0; P.tick_offset = 0;
@@ -621,6 +643,39 @@ static double display_pos(uint64_t pos, uint64_t seg_tick, double seg_sample,
 
 static int Sel, PlayingIdx = -1;
 
+/* mx held. Toggle a duck (keys D/P). The first duck arms the cue layer, which
+ * takes songvol ownership at the authored scale -- the game's own condition
+ * (its cue system always plays at the mastered volume). Turning both ducks off
+ * leaves the layer armed so the 2 s release ramp can finish; the manual volume
+ * keys (- = A) disarm it. */
+static void cue_toggle_locked(int which)
+{
+    int *flag = which == AE3_DUCK_DEMO ? &P.duck_demo : &P.duck_phone;
+    *flag = !*flag;
+    if (!P.cue_on) {
+        P.cue_on = 1;
+        if (PlayingIdx >= 0) {
+            P.cue_scale = Songs[PlayingIdx].vscale;
+            P.songvol = Songs[PlayingIdx].songvol;   /* what - = resume from */
+            P.authored = 1;
+        }
+        if (P.s) {
+            ae3_synth_cue_scale(P.s, P.cue_scale);
+            ae3_synth_cue_enable(P.s, true);
+        }
+    }
+    if (P.s) ae3_synth_cue_duck(P.s, which, *flag != 0);
+}
+
+/* mx held. Manual volume keys take songvol back from the cue layer. */
+static void cue_disarm_locked(void)
+{
+    if (!P.cue_on) return;
+    P.cue_on = P.duck_demo = P.duck_phone = 0;
+    if (P.s) ae3_synth_cue_enable(P.s, false);   /* last value stays until the
+                                                    caller's song_volume set */
+}
+
 static int load_song(int idx)
 {
     if (idx < 0 || idx >= NSongs) return -1;
@@ -644,6 +699,7 @@ static int load_song(int idx)
     free(P.hd); free(P.bd); free(P.mid);
     P.hd = hd; P.hn = hn; P.bd = bd; P.bn = bn; P.mid = mid; P.mn = mn;
     if (P.authored) P.songvol = Songs[idx].songvol;
+    P.cue_scale = Songs[idx].vscale;
     int rc = reload_locked();
     build_timeline_locked();
     if (rc == 0) {
@@ -798,6 +854,7 @@ int main(int argc, char **argv)
     P.exact = 1;
     P.rev_depth = 30;
     P.songvol = 44;
+    P.cue_scale = 44.5f / 127.0f;   /* until a song loads its authored scale */
     P.gaussian = 1;             /* the hardware kernel; G toggles bright */
 
     if (want)
@@ -932,20 +989,25 @@ int main(int argc, char **argv)
                     if (P.s) ae3_synth_reverb_depth(P.s, P.rev_depth);
                     break;
                 case SDLK_MINUS:
+                    cue_disarm_locked();
                     if (P.songvol > 1) P.songvol--;
                     P.authored = 0;
                     if (P.s) ae3_synth_song_volume(P.s, P.songvol, P.songvol);
                     break;
                 case SDLK_EQUALS:
+                    cue_disarm_locked();
                     if (P.songvol < 127) P.songvol++;
                     P.authored = 0;
                     if (P.s) ae3_synth_song_volume(P.s, P.songvol, P.songvol);
                     break;
                 case SDLK_a:
+                    cue_disarm_locked();
                     P.authored = 1;
                     if (PlayingIdx >= 0) P.songvol = Songs[PlayingIdx].songvol;
                     if (P.s) ae3_synth_song_volume(P.s, P.songvol, P.songvol);
                     break;
+                case SDLK_d: cue_toggle_locked(AE3_DUCK_DEMO); break;
+                case SDLK_p: cue_toggle_locked(AE3_DUCK_PHONE); break;
                 case SDLK_z: zoom_s = fmax(3.0,  zoom_s * 0.75); break;
                 case SDLK_x: zoom_s = fmin(48.0, zoom_s / 0.75); break;
                 case SDLK_e: export_current(PlayingIdx); break;
@@ -1008,6 +1070,8 @@ int main(int argc, char **argv)
         memcpy(vs, P.vs, sizeof vs);
         ae3_stats st = P.st;
         int playing = P.playing, finished = P.finished;
+        int cue_on = P.cue_on, duck_d = P.duck_demo, duck_p = P.duck_phone;
+        int cuesv = (cue_on && P.s) ? ae3_synth_cue_songvol(P.s) : -1;
         int whead = P.whead;
         static wcol_t wcol[WCOL_N];
         memcpy(wcol, P.wcol, sizeof wcol);
@@ -1045,12 +1109,17 @@ int main(int argc, char **argv)
         /* status line flows left to right so the green loop counter can sit
          * inline without colliding with the kernel label */
         char stat[256];
+        char duck[24] = "";
+        if (cue_on)   /* live cue songvol + which ducks are held (D/P keys) */
+            snprintf(duck, sizeof duck, " DUCK %s%s", duck_d ? "D" : "",
+                     duck_p ? "P" : (duck_d ? "" : "-"));
         snprintf(stat, sizeof stat,
-                 "%02d:%04.1f/%02d:%04.1f  %s  BPM %.0f  VOL %d%s  REV %d  %s  LOOP %s",
+                 "%02d:%04.1f/%02d:%04.1f  %s  BPM %.0f  VOL %d%s%s  REV %d  %s  LOOP %s",
                  (int)(cs / 60), fmod(cs, 60), (int)(ts / 60), fmod(ts, 60),
                  playing ? "PLAYING" : (finished ? "END" : "PAUSED"),
-                 bpm, P.songvol, P.authored ? " AUTH" : "", P.rev_depth,
-                 P.exact ? "EXACT" : "TICK", P.loop_on ? "ON" : "OFF");
+                 bpm, cue_on ? cuesv : P.songvol,
+                 cue_on ? "" : (P.authored ? " AUTH" : ""), duck,
+                 P.rev_depth, P.exact ? "EXACT" : "TICK", P.loop_on ? "ON" : "OFF");
         dtext(MAIN_X + 12, 40, 2, C_DIM, "%s", stat);
         int sx = MAIN_X + 12 + (int)strlen(stat) * 12;
         if (st.loops_taken) {

@@ -33,13 +33,38 @@ export async function renderWav(opts) {
     if (opts.revDepth != null) s.setReverbDepth(opts.revDepth);
     const vol = opts.songvol ?? 127;
     s.setSongVolume(vol, vol);
+    /* cue layer (M8): cueScale enables it (owns songvol); ducks =
+     * [{which, t0, t1}] hold a duck group between two sample times (seconds),
+     * edge-exact -- mirrors wavdump --cue/--duck. */
+    const ducks = (opts.ducks ?? []).map(d => ({
+        which: d.which, atOn: Math.round(d.t0 * RATE), atOff: Math.round(d.t1 * RATE),
+        onSent: false, offSent: false,
+    }));
+    if (opts.cueScale != null) {
+        s.cueScale(opts.cueScale);
+        s.cueEnable(true);
+    } else if (ducks.length) {
+        die("ducks need cueScale");
+    }
 
     const BLOCK = 4096;
     const buf = new Float32Array(BLOCK * 2);
     const chunks = [];
     let frames = 0;
     for (;;) {
-        const n = s.render(buf, BLOCK);
+        let want = BLOCK;
+        if (ducks.length) {
+            const pos = s.pos();
+            let next = Infinity;
+            for (const d of ducks) {
+                if (!d.onSent && pos >= d.atOn) { s.cueDuck(d.which, true); d.onSent = true; }
+                if (d.onSent && !d.offSent && pos >= d.atOff) { s.cueDuck(d.which, false); d.offSent = true; }
+                if (!d.onSent && d.atOn < next) next = d.atOn;
+                else if (d.onSent && !d.offSent && d.atOff < next) next = d.atOff;
+            }
+            if (next !== Infinity && want > next - pos) want = next - pos;
+        }
+        const n = s.render(buf, want);
         if (n < 0) die("render: nothing loaded");
         if (n === 0) break;
         chunks.push(floatToS16(buf, n * 2));
@@ -67,6 +92,11 @@ async function main() {
         const a = argv[i];
         if (a === "--tail") o.tail = parseFloat(argv[++i]);
         else if (a === "--songvol") o.songvol = parseInt(argv[++i]);
+        else if (a === "--cue") o.cueScale = parseFloat(argv[++i]);
+        else if (a === "--duck") {
+            const [w, t0, t1] = argv[++i].split(":").map(Number);
+            (o.ducks ??= []).push({ which: w, t0, t1 });
+        }
         else if (a === "--libsd") o.libsd = readFileSync(argv[++i]);
         else if (a === "--rev-depth") o.revDepth = parseInt(argv[++i]);
         else if (a === "--loop") o.loop = parseInt(argv[++i]);
