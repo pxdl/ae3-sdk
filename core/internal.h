@@ -306,8 +306,9 @@ struct ae3_synth {
     uint8_t   chan_cc10[16];    /* pan, default 64; clamped 1..127 at use */
     uint8_t   chan_cc11[16];    /* expression, default 127 (genuinely varies) */
     /* M7 driver CC state, all init 0 (chan-state init FUN_003f8034/003f8160 zeroes
-     * them). CC1/CC2 = the LFO depth/rate stores (chan+0x304/+0x300); the LFO itself
-     * renders in M9 -- until then these are state + stats only. CC98/CC99 = the NRPN
+     * them). CC1/CC2 = the LFO depth/rate stores (chan+0x304/+0x300): the CC handlers
+     * walk the channel's bound voices, and the note-on arms new voices from these
+     * stores (M9 -- vibrato needs both nonzero). CC98/CC99 = the NRPN
      * pair (chan+0x319/+0x318) CC6 dispatches on; chan_cc6 = data entry (+0x31a). */
     uint8_t   chan_cc1[16], chan_cc2[16];
     uint8_t   chan_nrpn_msb[16], chan_nrpn_lsb[16], chan_cc6[16];
