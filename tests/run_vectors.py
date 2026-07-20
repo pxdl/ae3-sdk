@@ -38,11 +38,14 @@ RENDERS = {
 # vectors rendered against a bank other than vec.hd (all share vec.bd)
 BANKS = {"lfo": "vlfo.hd"}
 
-# Embedded-SE sequencer: exact 480 Hz and console 60 Hz dispatch. The synthetic
-# stream covers A0/B0 running status, every B0 command, a finite loop, and SPU2 noise.
+# Embedded-SE sequencer: exact 480 Hz and console 60 Hz dispatch, plus host
+# play-once/forever control of an authored count=0 jump.
+# name -> (bank vector, extra serender args)
 SE_RENDERS = {
-    "se_exact": [],
-    "se_tick": ["--tick-events"],
+    "se_exact": ("vec_se.hd", []),
+    "se_tick": ("vec_se.hd", ["--tick-events"]),
+    "se_loop_once": ("vec_se_inf.hd", ["--loop", "0"]),
+    "se_loop_forever": ("vec_se_inf.hd", ["--loop", "127"]),
 }
 
 # EXST stream vectors through exstdump --decode, hashed as whole WAVs. The
@@ -87,11 +90,11 @@ def main():
             with open(out, "rb") as f:
                 hashes[name] = hashlib.sha256(f.read()).hexdigest()
 
-        for name, extra in SE_RENDERS.items():
+        for name, (bank, extra) in SE_RENDERS.items():
             out = os.path.join(td, name + ".wav")
             subprocess.run(
                 [SERENDER, "--seconds", "3", *extra, "-o", out,
-                 os.path.join(VEC, "vec_se.hd"), os.path.join(VEC, "vec.bd"),
+                 os.path.join(VEC, bank), os.path.join(VEC, "vec.bd"),
                  "0", "0"],
                 check=True, capture_output=True)
             with open(out, "rb") as f:

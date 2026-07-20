@@ -53,13 +53,14 @@ static int integer(const char *s, const char *what)
 int main(int argc, char **argv)
 {
     const char *out = "se.wav", *libsd = NULL, *pitch = NULL;
-    int seconds = 10, volume = 96;
+    int seconds = 10, volume = 96, loop = AE3_LOOP_FOREVER;
     bool exact = true, gaussian = true;
     int a = 1;
     while (a < argc && argv[a][0] == '-') {
         if (!strcmp(argv[a], "-o") && a + 1 < argc) out = argv[++a];
         else if (!strcmp(argv[a], "--seconds") && a + 1 < argc) seconds = integer(argv[++a], "seconds");
         else if (!strcmp(argv[a], "--volume") && a + 1 < argc) volume = integer(argv[++a], "volume");
+        else if (!strcmp(argv[a], "--loop") && a + 1 < argc) loop = integer(argv[++a], "loop");
         else if (!strcmp(argv[a], "--libsd") && a + 1 < argc) libsd = argv[++a];
         else if (!strcmp(argv[a], "--pitch-irx") && a + 1 < argc) pitch = argv[++a];
         else if (!strcmp(argv[a], "--tick-events")) exact = false;
@@ -68,10 +69,12 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "unknown option: %s\n", argv[a]); return 2; }
         a++;
     }
-    if (argc - a != 4 || seconds < 1 || volume < 0 || volume > 127) {
+    if (argc - a != 4 || seconds < 1 || volume < 0 || volume > 127 ||
+        loop > AE3_LOOP_FOREVER) {
         fprintf(stderr, "usage: serender [OPTIONS] BANK.hd BANK.bd BANK REQUEST\n"
                         "  -o FILE.wav  --seconds N  --volume 0..127 (default 96)\n"
-                        "  --pitch-irx FILE  --libsd FILE  --tick-events  --bright\n");
+                        "  --loop 0..127 (default 127)  --pitch-irx FILE  --libsd FILE\n"
+                        "  --tick-events  --bright\n");
         return 2;
     }
     int bank = integer(argv[a + 2], "bank"), request = integer(argv[a + 3], "request");
@@ -95,6 +98,7 @@ int main(int argc, char **argv)
     }
     ae3_synth_event_timing(s, exact);
     ae3_synth_gaussian(s, gaussian);
+    ae3_synth_set_loop(s, loop);
     ae3_synth_song_volume(s, volume, volume);
 
     FILE *f = fopen(out, "wb+");

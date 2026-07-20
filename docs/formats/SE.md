@@ -368,12 +368,16 @@ The offline `serender` harness drives this path through the native core:
    mode reproduces the EE walker's per-delay 60 Hz quantization. Voice ramps
    still step at the driver's 60 Hz flush cadence in both modes.
 
-The exported runtime API intentionally does **not** yet expose SE selection.
-That product surface is gated on a user listening comparison and a separate
-runtime/player decision. The offline harness contains no game data: callers
+The exported runtime API selects one request with `ae3_synth_load_se`; callers
 provide their own `.hd`/`.bd` and may optionally provide extracted
-`sg2iopm1.irx` pitch data and `libsd.irx` STUDIO_C coefficients. One render
-selects one request; a `B0 60` infinite loop remains live until the render cap.
+`sg2iopm1.irx` pitch data and `libsd.irx` STUDIO_C coefficients. The library and
+offline harness contain no game data.
+
+`ae3_synth_set_loop` lets a host control an authored `B0 60` with `count=0`:
+`0` falls through after the first pass, `1..126` takes that many jumps, and
+`AE3_LOOP_FOREVER` preserves console behavior. A nonzero count embedded in the
+request remains authoritative. `serender` selects `AE3_LOOP_FOREVER`, so an
+infinite request remains live until its render cap.
 
 ## 9. Tooling
 

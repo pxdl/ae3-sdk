@@ -254,8 +254,8 @@ def vlq(n):
     return bytes(reversed(out))
 
 
-def se_stream():
-    """All seseq command widths, running status, VLQs, and a finite B0 60 loop."""
+def se_stream(loop_count=2):
+    """All command widths, running status, VLQs, and a configurable B0 60 loop."""
     out = bytearray()
     out += bytes((0xA0, 60, 100, 0)) + vlq(12)
     out += bytes((60, 0, 0)) + vlq(4)                 # running A0: note-off
@@ -266,7 +266,7 @@ def se_stream():
     out += bytes((10, 4, 96, 0, 61)) + vlq(8)        # pan automation
     out += bytes((0x41, 4, 0xF6, 0, 61)) + vlq(8)    # glide to -1 semitone
     out += bytes((0xA0, 61, 0, 0)) + vlq(0)
-    out += bytes((0xB0, 0x60, 0, 0, 2)) + vlq(16)    # replay stream twice
+    out += bytes((0xB0, 0x60, 0, 0, loop_count)) + vlq(16)
     out += b"\xff\x2f\x00"
     return bytes(out)
 
@@ -386,6 +386,9 @@ def main():
     hd_se = se_bank_hd(se_stream(), len(BD))
     with open(os.path.join(OUT, "vec_se.hd"), "wb") as f:
         f.write(hd_se)                         # shares vec.bd
+    hd_se_inf = se_bank_hd(se_stream(0), len(BD))
+    with open(os.path.join(OUT, "vec_se_inf.hd"), "wb") as f:
+        f.write(hd_se_inf)                     # host loop-control vector
     for name, data in MIDIS.items():
         with open(os.path.join(OUT, name + ".mid"), "wb") as f:
             f.write(data)
@@ -393,7 +396,8 @@ def main():
         f.write(X_MONO)
     with open(os.path.join(OUT, "vec_stereo.x"), "wb") as f:
         f.write(X_STEREO)
-    print(f"vec.hd {len(hd)}B  vlfo.hd {len(hd_lfo)}B  vec_se.hd {len(hd_se)}B  "
+    print(f"vec.hd {len(hd)}B  vlfo.hd {len(hd_lfo)}B  "
+          f"vec_se.hd {len(hd_se)}B  vec_se_inf.hd {len(hd_se_inf)}B  "
           f"vec.bd {len(BD)}B  vec_mono.x {len(X_MONO)}B  "
           f"vec_stereo.x {len(X_STEREO)}B  + {len(MIDIS)} midis -> {OUT}")
 

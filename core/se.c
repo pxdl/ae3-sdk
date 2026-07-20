@@ -253,11 +253,14 @@ static bool next_event(ae3_synth *s)
             }
             add_delay(s, delay);
             delta_consumed = true;
-            bool jump = count == 0 || q->jump_count != count;
+            int loop_limit = count ? count : s->loop_cfg;
+            bool jump = loop_limit >= AE3_LOOP_FOREVER ||
+                        q->jump_count != (uint32_t)loop_limit;
             if (jump) {
-                if (count)
+                if (loop_limit < AE3_LOOP_FOREVER)
                     q->jump_count++;
                 q->p = q->start + target;
+                s->st.loops_taken++;
             } else {
                 q->jump_count = 0;
                 q->p = p;

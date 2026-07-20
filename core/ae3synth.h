@@ -200,21 +200,20 @@ void ae3_synth_cue_duck_config(ae3_synth *s, int which,
 int   ae3_synth_cue_songvol(const ae3_synth *s);
 float ae3_synth_cue_duck_level(const ae3_synth *s, int which);
 
-/* Song looping, the sequencer's own mechanism (pinned M7 from the game's SMF walker,
- * FUN_00402108 / FUN_00400e80): CC99 val 20 marks
- * the loop start, CC99 val 30 the loop end; both are consumed by the walker and never
- * reach the driver. At a loop end the count is decremented (0x7f = never) and while it
- * stays positive playback jumps back, deltas preserved across the seam. 64 of the 68
- * songs carry exactly one marker pair; the console plays BGM with count 0x7f (loop
- * forever, the play-open init).
- *   count = 0                 ignore the markers, play through once (the DEFAULT here:
- *                             the headless A/B oracles are single-pass)
- *   count = 1..126            take the loop-end jump while --count > 0 (walker rule;
- *                             count n plays the loop body n times total)
- *   count = AE3_LOOP_FOREVER  the console's BGM behavior; ae3_synth_done() then never
- *                             fires -- the host stops playback
- * A CC102 in the sequence overwrites the live counter (the walker's set-loop-count;
- * never sent by this corpus). Takes effect from the next loop-end marker reached. */
+/* Sequencer looping. Standard songs use the CC99 marker pair pinned in the
+ * game's SMF walker (FUN_00402108 / FUN_00400e80); embedded SE requests use
+ * B0 60 jumps pinned in docs/formats/SE.md section 6. A finite repeat count
+ * authored inside an SE request remains authoritative. The setting controls
+ * its count=0 (infinite) jumps:
+ *   count = 0                 BGM markers are ignored; an infinite SE request
+ *                             falls through after its first pass (the DEFAULT)
+ *   count = 1..126            take that many jumps
+ *   count = AE3_LOOP_FOREVER  console behavior; ae3_synth_done() never fires
+ *                             for a looping song/request, so the host stops it
+ * For BGM, each loop end decrements the live count and jumps while it stays
+ * positive. A CC102 in a standard sequence overwrites that live counter. For
+ * SE, an authored nonzero B0 60 count is followed exactly and is not replaced
+ * by this host setting. */
 #define AE3_LOOP_FOREVER 0x7f
 void ae3_synth_set_loop(ae3_synth *s, int count);
 
