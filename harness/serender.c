@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "internal.h"
+#include "ae3synth.h"
 
 static uint8_t *slurp(const char *path, size_t *len)
 {
@@ -50,11 +50,112 @@ static int integer(const char *s, const char *what)
     return (int)v;
 }
 
+static const char *env_name(uint8_t phase)
+{
+    static const char *const names[] = { "ATTACK", "DECAY", "SUSTAIN", "RELEASE", "OFF" };
+    return phase <= AE3_ENV_OFF ? names[phase] : "?";
+}
+
+static const char *source_name(uint8_t kind)
+{
+    static const char *const names[] = { "NONE", "ONESHOT", "LOOPED", "NOISE" };
+    return kind <= AE3_SOURCE_NOISE ? names[kind] : "?";
+}
+
+static void state_line(const char *tag, int slot, uint64_t frame,
+                       const ae3_voice_state *v)
+{
+    printf("%s slot=%d frame=%llu in_use=%d active=%d released=%d key=%u"
+           " env=%d env_phase=%s se_prog=%u source=%s waveform=%d samples=%u"
+           " loop_start=%d phase_q12=%lld loops=%u\n",
+           tag, slot, (unsigned long long)frame, v->in_use, v->active, v->released,
+           v->key, v->env, env_name(v->env_phase), v->se_prog,
+           source_name(v->source_kind), v->waveform, v->source_samples,
+           v->source_loop_start, (long long)v->source_phase_q12, v->source_loops);
+}
+
+static int active_slot(const ae3_synth *s, uint8_t key)
+{
+    ae3_voice_state v;
+    for (int slot = 0; slot < AE3_NVOICES; slot++) {
+        if (ae3_synth_voice(s, slot, &v) && v.active && v.key == key)
+            return slot;
+    }
+    return -1;
+}
+
+static int source_state_trace(ae3_synth *s)
+{
+    float mix[2];
+    ae3_voice_state current, previous;
+    uint64_t frame = 0;
+
+    ae3_synth_voice(s, 0, &current);
+    state_line("idle", 0, frame, &current);
+    printf("out_of_range=%d\n", ae3_synth_voice(s, AE3_NVOICES, &current));
+
+    ae3_synth_note_on(s, 0, 60, 100);
+    int loop_slot = active_slot(s, 60);
+    if (loop_slot < 0 || !ae3_synth_voice(s, loop_slot, &current))
+        return 1;
+    state_line("loop_unprimed", loop_slot, frame, &current);
+    if (ae3_synth_render(s, mix, 1) != 1)
+        return 1;
+    frame++;
+    ae3_synth_voice(s, loop_slot, &current);
+    state_line("loop_primed", loop_slot, frame, &current);
+
+    previous = current;
+    while (current.source_loops < 2 && frame < 2000) {
+        if (ae3_synth_render(s, mix, 1) != 1)
+            return 1;
+        frame++;
+        ae3_synth_voice(s, loop_slot, &current);
+        if (current.source_loops != previous.source_loops) {
+            const char *before = current.source_loops == 1
+                ? "loop1_before" : "loop2_before";
+            const char *after = current.source_loops == 1
+                ? "loop1_after" : "loop2_after";
+            state_line(before, loop_slot, frame - 1, &previous);
+            state_line(after, loop_slot, frame, &current);
+        }
+        previous = current;
+    }
+    if (current.source_loops != 2)
+        return 1;
+
+    ae3_synth_note_off(s, 0, 60);
+    ae3_synth_voice(s, loop_slot, &current);
+    state_line("loop_release", loop_slot, frame, &current);
+
+    ae3_synth_note_on(s, 0, 61, 100);
+    int noise_slot = active_slot(s, 61);
+    if (noise_slot < 0 || !ae3_synth_voice(s, noise_slot, &current))
+        return 1;
+    state_line("noise", noise_slot, frame, &current);
+
+    ae3_synth_note_on(s, 0, 62, 100);
+    int one_slot = active_slot(s, 62);
+    if (one_slot < 0 || !ae3_synth_voice(s, one_slot, &current))
+        return 1;
+    state_line("oneshot", one_slot, frame, &current);
+    while (current.active && frame < 5000) {
+        if (ae3_synth_render(s, mix, 1) != 1)
+            return 1;
+        frame++;
+        ae3_synth_voice(s, one_slot, &current);
+    }
+    if (current.active)
+        return 1;
+    state_line("ended", one_slot, frame, &current);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *out = "se.wav", *libsd = NULL, *pitch = NULL;
     int seconds = 10, volume = 96, loop = AE3_LOOP_FOREVER;
-    bool exact = true, gaussian = true;
+    bool exact = true, gaussian = true, source_state = false;
     int a = 1;
     while (a < argc && argv[a][0] == '-') {
         if (!strcmp(argv[a], "-o") && a + 1 < argc) out = argv[++a];
@@ -66,23 +167,27 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--tick-events")) exact = false;
         else if (!strcmp(argv[a], "--exact-events")) exact = true;
         else if (!strcmp(argv[a], "--bright")) gaussian = false;
+        else if (!strcmp(argv[a], "--source-state")) source_state = true;
         else { fprintf(stderr, "unknown option: %s\n", argv[a]); return 2; }
         a++;
     }
-    if (argc - a != 4 || seconds < 1 || volume < 0 || volume > 127 ||
+    int required = source_state ? 2 : 4;
+    if (argc - a != required || seconds < 1 || volume < 0 || volume > 127 ||
         loop > AE3_LOOP_FOREVER) {
-        fprintf(stderr, "usage: serender [OPTIONS] BANK.hd BANK.bd BANK REQUEST\n"
+        fprintf(stderr, "usage: serender [OPTIONS] BANK.hd BANK.bd [BANK REQUEST]\n"
                         "  -o FILE.wav  --seconds N  --volume 0..127 (default 96)\n"
                         "  --loop 0..127 (default 127)  --pitch-irx FILE  --libsd FILE\n"
-                        "  --tick-events  --bright\n");
+                        "  --tick-events  --bright  --source-state\n");
         return 2;
     }
-    int bank = integer(argv[a + 2], "bank"), request = integer(argv[a + 3], "request");
+    int bank = source_state ? 0 : integer(argv[a + 2], "bank");
+    int request = source_state ? 0 : integer(argv[a + 3], "request");
     size_t nh, nb;
     uint8_t *hd = slurp(argv[a], &nh), *bd = slurp(argv[a + 1], &nb);
     ae3_synth *s = ae3_synth_new();
     if (!s) { fprintf(stderr, "out of memory\n"); return 1; }
-    if (ae3_synth_load_bank(s, hd, nh, bd, nb) || ae3_synth_load_se(s, bank, request)) {
+    if (ae3_synth_load_bank(s, hd, nh, bd, nb) ||
+        (!source_state && ae3_synth_load_se(s, bank, request))) {
         fprintf(stderr, "%s\n", ae3_synth_error(s)); return 1;
     }
     free(hd); free(bd);
@@ -100,6 +205,11 @@ int main(int argc, char **argv)
     ae3_synth_gaussian(s, gaussian);
     ae3_synth_set_loop(s, loop);
     ae3_synth_song_volume(s, volume, volume);
+    if (source_state) {
+        int rc = source_state_trace(s);
+        ae3_synth_free(s);
+        return rc;
+    }
 
     FILE *f = fopen(out, "wb+");
     if (!f) { fprintf(stderr, "cannot create %s\n", out); return 1; }

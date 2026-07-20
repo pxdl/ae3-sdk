@@ -122,7 +122,6 @@ bool ae3_voice_tick(ae3_voice *v, const int16_t (*interp)[4],
 
 /* SPU2 envelope, clocked per output sample (ENV_HZ == AE3_RATE). Level 0..0x7FFF is a
  * straight amplitude multiplier -- the whole point of the native synth (no dB shapes). */
-enum { AE3_ENV_ATTACK, AE3_ENV_DECAY, AE3_ENV_SUSTAIN, AE3_ENV_RELEASE };
 
 typedef struct {
     uint16_t a1, a2;
@@ -148,6 +147,7 @@ struct ae3_voice {
     bool     active, released;    /* active = still rendering (env alive) */
     uint8_t  ch, key, vel;
     const ae3_tone *tone;
+    int      waveform;            /* loaded-bank waveform index, resolved at note-on */
     ae3_adpcm dec;
     ae3_env   env;
     /* pitch: hardware counter, 12-bit fraction. Bits 4-11 index the gaussian table;

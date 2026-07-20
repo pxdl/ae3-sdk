@@ -252,16 +252,44 @@ uint64_t ae3_synth_pos(const ae3_synth *s);
 
 /* One voice slot's live state. Slots free only at the 60 Hz update tick (the
  * driver's ENVX<2 poll), so in_use outlives audibility slightly -- the real
- * allocator behavior, worth showing truthfully in a slot view. */
+ * allocator behavior, worth showing truthfully in a slot view.
+ *
+ * source_phase_q12 names the decoder/interpolator state for the next output
+ * sample in native-source samples (12 fractional bits). It is independent of
+ * output rate, pitch, sequence position, and ADSR progress. */
+enum {
+    AE3_ENV_ATTACK,
+    AE3_ENV_DECAY,
+    AE3_ENV_SUSTAIN,
+    AE3_ENV_RELEASE,
+    AE3_ENV_OFF
+};
+
+enum {
+    AE3_SOURCE_NONE,
+    AE3_SOURCE_ONESHOT,
+    AE3_SOURCE_LOOPED,
+    AE3_SOURCE_NOISE
+};
+
 typedef struct {
-    bool    in_use;             /* slot bound to a note */
-    bool    active;             /* still rendering (envelope alive) */
-    bool    released;           /* key-off seen, envelope in release */
-    uint8_t ch, key;
-    int32_t env;                /* SPU2 envelope level, 0..0x7FFF, linear */
+    bool     in_use;             /* slot bound to a note */
+    bool     active;             /* still rendering (envelope alive) */
+    bool     released;           /* key-off seen, envelope in release */
+    uint8_t  ch, key;
+    int32_t  env;                /* SPU2 envelope level, 0..0x7FFF, linear */
+    uint8_t  env_phase;          /* AE3_ENV_*; OFF when inactive */
+    uint8_t  se_prog;            /* SE program, UINT8_MAX when not an active SE voice */
+    uint8_t  source_kind;        /* AE3_SOURCE_* */
+    int32_t  waveform;           /* loaded-bank waveform index; -1 for NONE/NOISE */
+    uint32_t source_samples;      /* single-pass native-source length; 0 for NONE/NOISE */
+    int32_t  source_loop_start;  /* native-source sample; -1 for one-shot/NONE/NOISE */
+    int64_t  source_phase_q12;   /* next output phase; 0 while unprimed, -1 if invalid */
+    uint32_t source_loops;        /* completed decoder seams */
 } ae3_voice_state;
 
-/* Copy slot i's state (0..AE3_NVOICES-1). Returns false if i is out of range. */
+/* Copy slot i's state (0..AE3_NVOICES-1). Returns false if i is out of range.
+ * Idle/ended slots report NONE, waveform/phase -1, and envelope OFF. */
 bool ae3_synth_voice(const ae3_synth *s, int i, ae3_voice_state *out);
 
 /* Parsed-sequence event kinds. The LOOP/HOOK kinds are CCs the game's SMF

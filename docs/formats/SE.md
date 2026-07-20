@@ -373,6 +373,44 @@ provide their own `.hd`/`.bd` and may optionally provide extracted
 `sg2iopm1.irx` pitch data and `libsd.irx` STUDIO_C coefficients. The library and
 offline harness contain no game data.
 
+### Read-only live voice state
+
+`ae3_synth_voice` exposes observation state without changing allocation or DSP.
+For an active sampled voice it reports the cached bank-waveform index, its
+single-pass native-source length and loop start, the completed decoder seam
+count, the SE program/key, and the independent ADSR level and phase. Waveform
+identity is resolved once at note-on from the bank's address-sorted waveform
+table; snapshots do not scan the table or decode PCM.
+
+`source_phase_q12` is the decoder/interpolator state for the **next synthesized
+output sample**, measured from the waveform start in native-source samples with
+12 fractional bits. Once the interpolation window is primed, its exact
+coordinate is:
+
+```text
+source_sample = ((dec.frame - dec.start) / 16) * 28 + dec.pos - 1
+source_phase_q12 = source_sample * 4096 + counter
+```
+
+The residual `counter` is in `[0, 4096)`. The coordinate therefore follows live
+pitch stepping but is independent of output rate, request transport time, and
+ADSR progress. At an END+REPEAT seam it jumps from the end of the single pass
+to `loop_start`, `source_loops` increments once, and the envelope does not
+restart.
+
+The stable sentinels are:
+
+| voice state | source kind | waveform | loop start | phase Q12 | envelope phase |
+|---|---|---:|---:|---:|---|
+| idle or ended | `AE3_SOURCE_NONE` | −1 | −1 | −1 | `AE3_ENV_OFF` |
+| active, interpolation window not primed | one-shot or looped | valid | metadata value | 0 | live |
+| active one-shot ADPCM | `AE3_SOURCE_ONESHOT` | valid | −1 | valid | live |
+| active looped ADPCM | `AE3_SOURCE_LOOPED` | valid | valid | valid | live |
+| active SPU2 noise | `AE3_SOURCE_NOISE` | −1 | −1 | −1 | live |
+
+`se_prog` is `UINT8_MAX` when the slot is not an active SE voice. No public
+field exposes a pointer or private C layout.
+
 `ae3_synth_set_loop` lets a host control an authored `B0 60` with `count=0`:
 `0` falls through after the first pass, `1..126` takes that many jumps, and
 `AE3_LOOP_FOREVER` preserves console behavior. A nonzero count embedded in the
@@ -405,6 +443,11 @@ structural invariants in §§2–7; and an independent full-bytecode parse pinne
 the §6.3 event/command/VLQ/jump census. Public golden vectors add a hand-authored,
 zero-Sony-data SE bank whose render covers `A0`, all six `B0` commands, finite
 looping, cut-groups, LFO, noise, and both event-timing modes.
+`serender --source-state` drives the same synthetic bank through only the public
+API and emits a canonical trace for idle, unprimed, primed, pre/post-seam,
+release, noise, one-shot, and ended states. Native and WASM vector gates hash
+the same trace and assert the Q12 wrap, seam count, sentinels, and envelope
+continuity.
 
 ## 10. Provenance
 

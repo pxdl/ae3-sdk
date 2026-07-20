@@ -271,6 +271,20 @@ void ae3__voice_refresh(ae3_synth *s, ae3_voice *v)
                     v->cpan, v->tpan, &v->voll, &v->volr);
 }
 
+static int find_waveform(const ae3_bank *bank, uint16_t addr)
+{
+    int lo = 0, hi = bank->nwaves;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        uint32_t candidate = bank->waves[mid].addr;
+        if (candidate < addr)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < bank->nwaves && bank->waves[lo].addr == addr ? lo : -1;
+}
+
 static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
                         const ae3_prog *p, const ae3_tone *t)
 {
@@ -300,6 +314,7 @@ static bool start_voice(ae3_synth *s, uint8_t ch, uint8_t key, uint8_t vel,
     v->key = key;
     v->vel = vel;                /* raw; the shipped velocity chunk is identity */
     v->tone = t;
+    v->waveform = find_waveform(&s->bank, t->addr);
     v->se_voice = s->bank.se;
     v->se_prog = ch;
     v->cut_group = t->cut_group;
@@ -859,8 +874,41 @@ bool ae3_synth_voice(const ae3_synth *s, int i, ae3_voice_state *out)
     if (i < 0 || i >= AE3_NVOICES)
         return false;
     const ae3_voice *v = &s->voices[i];
-    *out = (ae3_voice_state){ v->in_use, v->active, v->released,
-                              v->ch, v->key, v->env.level };
+    *out = (ae3_voice_state){
+        .in_use = v->in_use,
+        .active = v->active,
+        .released = v->released,
+        .ch = v->ch,
+        .key = v->key,
+        .env = v->env.level,
+        .env_phase = v->active ? (uint8_t)v->env.phase : AE3_ENV_OFF,
+        .se_prog = v->active && v->se_voice ? v->se_prog : UINT8_MAX,
+        .source_kind = AE3_SOURCE_NONE,
+        .waveform = -1,
+        .source_loop_start = -1,
+        .source_phase_q12 = -1,
+    };
+    if (!v->active)
+        return true;
+    if (v->tone->flags & AE3_TF_NOISE) {
+        out->source_kind = AE3_SOURCE_NOISE;
+        return true;
+    }
+    if (v->waveform < 0)
+        return true;
+    const ae3_waveform *wave = &s->bank.waves[v->waveform];
+    out->source_kind = wave->loop_start < 0 ? AE3_SOURCE_ONESHOT : AE3_SOURCE_LOOPED;
+    out->waveform = v->waveform;
+    out->source_samples = wave->samples;
+    out->source_loop_start = wave->loop_start;
+    out->source_loops = v->dec.loops;
+    if (!v->win_primed) {
+        out->source_phase_q12 = 0;
+        return true;
+    }
+    int64_t source_sample =
+        ((int64_t)v->dec.frame - v->dec.start) / 16 * 28 + v->dec.pos - 1;
+    out->source_phase_q12 = source_sample * 0x1000 + v->counter;
     return true;
 }
 

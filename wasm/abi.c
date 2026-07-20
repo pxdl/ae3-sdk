@@ -11,18 +11,28 @@
  * so they split into lo32/hi32 pairs instead. */
 #include "ae3synth.h"
 
-/* in_use, active, released, ch, key, env */
-int ae3w_voice(const ae3_synth *s, int i, int32_t out[6])
+/* Packed voice snapshot: flags (1 in_use, 2 active, 4 released), ch, key, env,
+ * env_phase, se_prog, source_kind, waveform, source_samples, source_loop_start,
+ * source_phase_q12, source_loops. Integers are exact as doubles (the largest,
+ * source_phase_q12, is bounded below 2^44 for the supported bank format). */
+#define AE3W_NVOICE 12
+int ae3w_voice(const ae3_synth *s, int i, double out[AE3W_NVOICE])
 {
     ae3_voice_state v;
     if (!ae3_synth_voice(s, i, &v))
         return 0;
-    out[0] = v.in_use;
-    out[1] = v.active;
-    out[2] = v.released;
-    out[3] = v.ch;
-    out[4] = v.key;
-    out[5] = v.env;
+    out[0] = (v.in_use ? 1 : 0) | (v.active ? 2 : 0) | (v.released ? 4 : 0);
+    out[1] = v.ch;
+    out[2] = v.key;
+    out[3] = v.env;
+    out[4] = v.env_phase;
+    out[5] = v.se_prog;
+    out[6] = v.source_kind;
+    out[7] = v.waveform;
+    out[8] = v.source_samples;
+    out[9] = v.source_loop_start;
+    out[10] = (double)v.source_phase_q12;
+    out[11] = v.source_loops;
     return 1;
 }
 

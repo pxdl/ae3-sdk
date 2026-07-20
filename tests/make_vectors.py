@@ -127,9 +127,10 @@ def se_bank_hd(stream, bd_len):
         se_tone(1, 10, 60, ADDR_LOOPED, A1_FAST_FULL, A2_LIN_HOLD),
         se_tone(1, 10, 51, ADDR_LOOPED, A1_FAST_FULL, A2_LIN_HOLD, flags=0x02),
     ]
+    tones += [se_tone(0, 10, 60, ADDR_ONESHOT, A1_FAST_FULL, A2_LIN_HOLD)]
     tones += [
         se_tone(0, 10, 60, ADDR_LOOPED, A1_FAST_FULL, A2_LIN_HOLD)
-        for _ in range(25)
+        for _ in range(24)
     ]
     seprog = struct.pack("<HH", 0, 4) + prog(0xFF, tones, key0=60, key1=86)
     # Both offset levels are seseq-base-relative: outer[0] -> inner at +4,

@@ -67,6 +67,56 @@ DUMPS = {
 }
 
 
+def source_states(text):
+    states = {}
+    for line in text.decode().splitlines():
+        fields = line.split()
+        if not fields or "=" in fields[0]:
+            continue
+        states[fields[0]] = {
+            key: value for key, value in (field.split("=", 1) for field in fields[1:])
+        }
+    return states
+
+
+def validate_source_state(text):
+    state = source_states(text)
+
+    def number(tag, field):
+        return int(state[tag][field])
+
+    def need(condition, message):
+        if not condition:
+            raise RuntimeError(f"source-state assertion failed: {message}")
+
+    need(number("loop_unprimed", "samples") == 224, "source length")
+    need(number("loop_unprimed", "loop_start") == 56, "loop start")
+    need(number("loop_unprimed", "phase_q12") == 0, "unprimed phase")
+    need(number("loop_primed", "phase_q12") > 0, "primed phase")
+    need(number("loop1_before", "phase_q12") > number("loop1_after", "phase_q12"),
+         "first phase wrap")
+    need(number("loop1_before", "loops") == 0
+         and number("loop1_after", "loops") == 1
+         and number("loop2_after", "loops") == 2, "seam counts")
+    need(number("loop1_before", "env") == number("loop1_after", "env")
+         and state["loop1_before"]["env_phase"] == state["loop1_after"]["env_phase"],
+         "envelope seam continuity")
+    need(state["loop_release"]["env_phase"] == "RELEASE"
+         and number("loop_release", "loops") == 2, "release continuity")
+    need(state["noise"]["source"] == "NOISE"
+         and number("noise", "waveform") == -1
+         and number("noise", "phase_q12") == -1, "noise sentinel")
+    need(state["oneshot"]["source"] == "ONESHOT"
+         and number("oneshot", "loop_start") == -1
+         and number("oneshot", "phase_q12") == 0, "one-shot sentinel")
+    for tag in ("idle", "ended"):
+        need(state[tag]["source"] == "NONE"
+             and state[tag]["env_phase"] == "OFF"
+             and number(tag, "waveform") == -1
+             and number(tag, "phase_q12") == -1, f"{tag} sentinel")
+    need(b"out_of_range=0\n" in text, "out-of-range query")
+
+
 def main():
     update = "--update" in sys.argv
     subprocess.run(["make", "-C", os.path.join(ROOT, "core")],
@@ -124,6 +174,12 @@ def main():
                 for line in r.stdout.decode().splitlines())
             hashes["decode_api"] = hashlib.sha256(api.encode()).hexdigest()
 
+    source = subprocess.run(
+        [SERENDER, "--source-state", os.path.join(VEC, "vec_se.hd"),
+         os.path.join(VEC, "vec.bd")],
+        check=True, capture_output=True).stdout
+    validate_source_state(source)
+    hashes["source_state"] = hashlib.sha256(source).hexdigest()
     if update:
         with open(GOLDEN, "w") as f:
             for name, h in sorted(hashes.items()):
