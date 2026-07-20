@@ -5,6 +5,7 @@ core/*.d
 harness/wavdump
 harness/bgmplay
 harness/exstdump
+harness/serender
 wasm/dist/
 extract-web/dist/
 node_modules/
