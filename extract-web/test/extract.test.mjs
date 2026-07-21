@@ -10,11 +10,13 @@ import {
     BytesSource, Iso9660, systemCnfSerial, Vfi, inflateSz,
     unpackPck, memberBytes, typeOf, attrsOf, safeMember, pckFileNames,
     parseExdb, bgmDescRecords, bgmSongTable, natcmp, sniff, openDisc,
+    locateFmvAssets, parseFmvHeader, demuxFmv, parseFmvSubtitles,
+    subtitlesToSrt, subtitlesToVtt,
 } from "../src/index.ts";
 import {
-    buildSz, buildPck, buildExdb, buildVfi, buildIso,
+    buildSz, buildPck, buildExdb, buildVfi, buildIso, buildFmv,
+    buildFmvSubtitles,
 } from "./fixtures.mjs";
-
 const enc = new TextEncoder();
 const bytes = (...v) => Uint8Array.from(v);
 
@@ -44,6 +46,101 @@ test("vfi: paths, offsets, payloads", async () => {
 test("vfi: bad magic rejected", async () => {
     await assert.rejects(Vfi.open(new BytesSource(new Uint8Array(64))),
                          /bad VFI magic/);
+});
+
+/* ---- fmv ---------------------------------------------------------------- */
+
+test("fmv: region-tolerant discovery, subtitle pairing, blank sentinel", async () => {
+    const movie = buildFmv().bytes;
+    const { bin, sbt } = buildFmvSubtitles();
+    const vfi = await Vfi.open(new BytesSource(buildVfi([
+        { path: "debug/jp/movie/new_scene01.str", data: movie },
+        { path: "debug/us/movie/new_scene01.str", data: movie },
+        { path: "debug/us/movie/scene01.bin", data: bin },
+        { path: "debug/us/movie/scene01.sbt", data: sbt },
+        { path: "debug/us/movie/new_play01.str", data: movie },
+        { path: "debug/us/movie/blank.bin", data: bin },
+        { path: "debug/us/movie/blank.sbt", data: sbt },
+    ])));
+    const assets = locateFmvAssets(vfi);
+    assert.deepEqual(assets.map(asset => asset.name), ["new_play01", "new_scene01"]);
+    assert.equal(assets[0].subtitleBin, null);
+    assert.equal(assets[1].subtitleBin?.name, "scene01.bin");
+    assert.equal(assets[1].subtitleSbt?.name, "scene01.sbt");
+    assert.ok(!assets.some(asset => asset.name.includes("blank")));
+});
+
+test("fmv: progressive demux, odd fields, audio alignment and predictor history", () => {
+    const fixture = buildFmv();
+    const header = parseFmvHeader(fixture.bytes.subarray(0, 0x800), "fixture");
+    assert.equal(header.fields, 3);
+    assert.equal(header.fieldRate, 59.94);
+    assert.equal(header.audioBytes, 64);
+
+    const fmv = demuxFmv(fixture.bytes, "fixture");
+    assert.deepEqual(fmv.video, fixture.video);
+    assert.deepEqual(fmv.groups.map(group => group.fields), [2, 1]);
+    assert.deepEqual(fmv.videoInfo, {
+        width: 512,
+        height: 320,
+        frameRate: 30000 / 1001,
+        fieldOrder: "progressive",
+        sampleAspect: [7, 6],
+        displayAspect: [28, 15],
+    });
+    assert.equal(new TextDecoder().decode(fmv.wav.subarray(0, 4)), "RIFF");
+    assert.equal(fmv.wav.length, 44 + 56 * 2 * 2);
+    const wav = new DataView(fmv.wav.buffer, fmv.wav.byteOffset, fmv.wav.byteLength);
+    assert.notEqual(wav.getInt16(44 + (28 * 2) * 2, true), 0,
+                    "filter history must persist into the second channel block");
+});
+
+test("fmv: top- and bottom-field metadata come from MPEG extensions", () => {
+    assert.equal(demuxFmv(buildFmv({ progressive: false }).bytes)
+        .videoInfo.fieldOrder, "tt");
+    assert.equal(demuxFmv(buildFmv({ progressive: false, topFieldFirst: false }).bytes)
+        .videoInfo.fieldOrder, "bb");
+});
+
+test("fmv: malformed offsets, padding and truncation fail hard", () => {
+    const original = buildFmv().bytes;
+    const secondGroup = new TextEncoder().encode("GroupOfDataInfo\0");
+    let first = -1;
+    let second = -1;
+    for (let i = 0; i <= original.length - secondGroup.length; i++) {
+        if (secondGroup.every((value, j) => original[i + j] === value)) {
+            if (first < 0) first = i;
+            else { second = i; break; }
+        }
+    }
+    assert.ok(first >= 0 && second >= 0);
+    const nonzeroPadding = original.slice();
+    nonzeroPadding[second - 33] = 1;
+    assert.throws(() => demuxFmv(nonzeroPadding), /audio-gap padding/);
+    assert.throws(() => demuxFmv(original.subarray(0, second + 10)),
+                  /range|truncated|missing following/);
+});
+
+test("fmv subtitles: strict UTF-8, timing bounds, spacer removal, SRT and VTT", () => {
+    const fixture = buildFmvSubtitles();
+    const cues = parseFmvSubtitles(fixture.bin, fixture.sbt, "fixture");
+    assert.deepEqual(cues.map(cue => cue.text), ["Hello", "Top\nBottom"]);
+    assert.equal(new TextDecoder().decode(subtitlesToSrt(cues)),
+        "1\n00:00:00,500 --> 00:00:01,000\nHello\n\n"
+        + "2\n00:00:01,250 --> 00:00:02,000\nTop\nBottom\n");
+    assert.equal(new TextDecoder().decode(subtitlesToVtt(cues)),
+        "WEBVTT\n\n1\n00:00:00.500 --> 00:00:01.000\nHello\n\n"
+        + "2\n00:00:01.250 --> 00:00:02.000\nTop\nBottom\n");
+
+    const badUtf8 = fixture.bin.slice();
+    badUtf8[fixture.textOffset] = 0xff;
+    assert.throws(() => parseFmvSubtitles(badUtf8, fixture.sbt), /strict UTF-8/);
+    const badTiming = fixture.sbt.slice();
+    new DataView(badTiming.buffer).setFloat32(0x2c, 2.5, true);
+    assert.throws(() => parseFmvSubtitles(fixture.bin, badTiming), /invalid range/);
+    const badOffset = fixture.bin.slice();
+    new DataView(badOffset.buffer).setUint32(0x20, 0xfffffff0, true);
+    assert.throws(() => parseFmvSubtitles(badOffset, fixture.sbt), /section order/);
 });
 
 /* ---- sz ----------------------------------------------------------------- */

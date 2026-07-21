@@ -13,14 +13,15 @@ Tools in the `ae3tools` package (`ae3` CLI):
 
 ```
 ae3 strextract --list
-ae3 strextract --glob new_scene01 --out <outdir> --mp4
-ae3 strextract --all           --out <outdir> --mp4
+ae3 strextract --glob new_scene01 --out <outdir> --mkv
+ae3 strextract --all           --out <outdir> --mkv
 ```
 
 `ae3 strextract` writes `<name>.m2v` (bit-exact original video), `<name>.wav`
-(decoded audio), and with `--mp4` a `<name>.mkv` muxing both (video `-c:v copy`,
-audio FLAC — lossless end to end). `ae3 sbt2srt` decodes the subtitle sidecars
-(§6); `ae3 fmv2mp4` makes playable `.mp4` convenience copies (§5b).
+(decoded audio), and with `--mkv` a lossless MPEG-2/FLAC `.mkv` tagged with the
+proven 7:6 sample aspect. Matching subtitle sidecars are decoded and included as
+SubRip automatically. `ae3 sbt2srt` can decode those sidecars separately (§6);
+`ae3 fmv2mp4 --captions` makes playable captioned `.mp4` convenience copies (§5b).
 
 > The extracted video is Sony's copyrighted content. This document specifies the
 > container format only; the SDK ships no game data. See `NOTICE.md` for the
@@ -385,7 +386,8 @@ Format derived by structural analysis (the tags are self-describing) and
 verified empirically, per the project rule that a claim needs a second source or
 an empirical test:
 
-- the chunk walk **consumes every byte** of every file (ends at EOF, no orphans);
+- the chunk walk validates and consumes every tagged payload, audio gap, and
+  final sector-padding byte (nonzero unparsed data is an error);
 - per-group video-chunk counts from `GroupOfDataInfo` **sum to exactly** the
   number of `Mpeg2Video` chunks actually walked (81/81 in `dolby_pl2`) — so no
   chunk is silently dropped;
@@ -417,5 +419,7 @@ phase(t) = ((t - preload) / block) mod 1     # ~0 => sits ON a block boundary
 Correctly extracted, silences scatter uniformly (mean phase distance 0.23–0.29,
 where 0.25 is random) — i.e. natural pauses. Anything clustering at phase ≈ 0
 means the gap layout has been misread. Re-run this before trusting a change to
-the audio path. `ae3 strextract` keeps the first two checks above as runtime
-assertions and warns on mismatch, so a bad file cannot pass silently.
+the audio path. `ae3 strextract` treats header arithmetic, bounds, padding,
+declared group/field/chunk/audio totals, and full container consumption as hard
+runtime validation. A truncated or structurally inconsistent file fails without
+writing a partial result.

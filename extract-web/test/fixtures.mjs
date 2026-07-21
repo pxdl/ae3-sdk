@@ -162,6 +162,104 @@ export function buildVfi(files) {
     return b.build();
 }
 
+function bitBytes(fields) {
+    const bits = fields.flatMap(([value, width]) =>
+        Array.from({ length: width }, (_, i) => (value >> (width - i - 1)) & 1));
+    while (bits.length % 8) bits.push(0);
+    const out = new Uint8Array(bits.length / 8);
+    bits.forEach((bit, i) => { out[i >> 3] |= bit << (7 - (i & 7)); });
+    return out;
+}
+
+function startCode(code, payload) {
+    return new Builder().u8(0).u8(0).u8(1).u8(code).bytes(payload).build();
+}
+
+function syntheticMpeg(width, height, progressive, topFieldFirst) {
+    const sequence = startCode(0xb3, bitBytes([
+        [width, 12], [height, 12], [1, 4], [4, 4],
+    ]));
+    const extension = startCode(0xb5, bitBytes([
+        [1, 4], [0x48, 8], [progressive ? 1 : 0, 1], [1, 2],
+        [0, 2], [0, 2],
+    ]));
+    if (progressive)
+        return new Builder().bytes(sequence).bytes(extension)
+            .bytes(startCode(0xb7, new Uint8Array())).build();
+    const pictureCoding = startCode(0xb5, bitBytes([
+        [8, 4], [0xffff, 16], [0, 2], [3, 2], [topFieldFirst ? 1 : 0, 1],
+        [0, 7], [0, 1],
+    ]));
+    return new Builder().bytes(sequence).bytes(extension).bytes(pictureCoding)
+        .bytes(startCode(0xb7, new Uint8Array())).build();
+}
+
+function fmvChunk(tag, index, payload) {
+    const b = new Builder();
+    b.str(tag).pad(16 - tag.length).u32(index).u32(payload.length).u32(0).u32(0)
+     .bytes(payload);
+    while (b.length % 16) b.u8(0);
+    return b.build();
+}
+
+function adpcmFrame(header, packedNibble) {
+    return new Builder().u8(header).u8(0).pad(14, packedNibble).build();
+}
+
+/** Two-group STR with odd field total, leading audio-gap padding and ADPCM
+ * predictor history that crosses the group boundary. */
+export function buildFmv({ progressive = true, topFieldFirst = true } = {}) {
+    const video = syntheticMpeg(512, progressive ? 320 : 448,
+                                progressive, topFieldFirst);
+    const firstAudio = new Builder()
+        .bytes(adpcmFrame(0x00, 0x11)).bytes(adpcmFrame(0x00, 0x22)).build();
+    const secondAudio = new Builder()
+        .bytes(adpcmFrame(0x10, 0x00)).bytes(adpcmFrame(0x10, 0x00)).build();
+    const group1 = fmvChunk("GroupOfDataInfo", 0,
+                            new Builder().u32(2).u32(1).u32(7).u32(0).build());
+    const group2 = fmvChunk("GroupOfDataInfo", 2,
+                            new Builder().u32(1).u32(1).u32(8).u32(0).build());
+    const video1 = fmvChunk("Mpeg2Video", 0, video);
+    const video2 = fmvChunk("Mpeg2Video", 2, new Uint8Array());
+
+    const b = new Builder();
+    b.str("str").u8(0).u32(0).u32(3).u32(5994).u32(2).pad(12)
+     .u32(48000).u32(2).u32(16).u32(32).u32(32).u32(64)
+     .padTo(0x800).bytes(firstAudio).bytes(group1).bytes(video1)
+     .pad(16).bytes(secondAudio).bytes(group2).bytes(video2);
+    while (b.length % 0x800) b.u8(0);
+    return { bytes: b.build(), video };
+}
+
+/** Strict two-cue .bin/.sbt pair. First cue carries the game's U+3000 spacer. */
+export function buildFmvSubtitles() {
+    const strings = [enc.encode("\u3000\nHello\0"), enc.encode("Top\nBottom\0")];
+    const names = 0x30;
+    const index = names + 2 * 0x28;
+    const records = index + 2 * 8;
+    const text = records + 2 * 0x18;
+    const bin = new Builder();
+    bin.u32(0x72312487).u32(2)
+       .u32(names).u32(0).u32(index).u32(0)
+       .u32(records).u32(0).u32(text).u32(0).padTo(names);
+    for (let i = 0; i < 2; i++)
+        bin.str(`subtitle_${i}`).u8(0).padTo(names + (i + 1) * 0x28);
+    bin.padTo(index + 2 * 8).padTo(records);
+    let stringOffset = 0;
+    for (const value of strings) {
+        bin.pad(0x14).u32(stringOffset);
+        stringOffset += value.length;
+    }
+    bin.padTo(text);
+    strings.forEach(value => bin.bytes(value));
+
+    const sbt = new Builder();
+    sbt.str("sbt").u8(0).u32(2).f32(0.5).f32(2)
+       .u32(0).u32(0).f32(0.5).f32(1)
+       .u32(1).u32(0).f32(1.25).f32(2);
+    return { bin: bin.build(), sbt: sbt.build(), textOffset: text };
+}
+
 const ISO_SECTOR = 2048;
 
 function dirent(name, lba, size, isDir) {

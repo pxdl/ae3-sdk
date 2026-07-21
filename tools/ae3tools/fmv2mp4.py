@@ -38,6 +38,18 @@ def field_order(m2v):
     return out.split("=", 1)[-1].strip().strip(",")
 
 
+def subtitle_path(directory, movie_name):
+    if not movie_name.startswith("new_scene"):
+        return None
+    subtitle_name = movie_name.removeprefix("new_") + ".srt"
+    for candidate in (
+            os.path.join(directory, "subs", subtitle_name),
+            os.path.join(directory, subtitle_name)):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Convert extracted .m2v+.wav FMV pairs to playable .mp4 "
@@ -50,6 +62,8 @@ def main():
     ap.add_argument("--crf", default=os.environ.get("CRF", "15"),
                     help="x264 CRF (default 15: visually lossless here; source "
                          "is ~3.7 Mbps MPEG-2)")
+    ap.add_argument("--captions", action="store_true",
+                    help="include a matching sceneNN.srt as a soft mov_text track")
     a = ap.parse_args()
     outdir = a.out if a.out is not None else os.path.join(a.dir, "mp4")
     os.makedirs(outdir, exist_ok=True)
@@ -79,16 +93,27 @@ def main():
         # -r before -i: a raw ES has no timestamps, so the input rate must be
         # stated. -shortest: drops the ~0.89s of audio still in the stream buffer
         # when video ends (see docs/formats/FMV.md §3 -- expected, not a sync bug).
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
-             "-r", "30000/1001", "-i", m2v, "-i", wav,
-             "-map", "0:v", "-map", "1:a",
-             "-vf", vf, "-r", rate,
-             "-c:v", "libx264", "-crf", str(a.crf), "-preset", "slow",
-             "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-b:a", "256k",
-             "-movflags", "+faststart", "-shortest", dst],
-            check=True)
+        command = [
+            "ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
+            "-r", "30000/1001", "-i", m2v, "-i", wav,
+        ]
+        subtitle = subtitle_path(a.dir, n) if a.captions else None
+        if subtitle:
+            command.extend(["-i", subtitle])
+        command.extend([
+            "-map", "0:v", "-map", "1:a",
+            "-vf", vf, "-r", rate,
+            "-c:v", "libx264", "-crf", str(a.crf), "-preset", "slow",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "256k",
+        ])
+        if subtitle:
+            command.extend([
+                "-map", "2:s", "-c:s", "mov_text",
+                "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default",
+            ])
+        command.extend(["-movflags", "+faststart", "-shortest", dst])
+        subprocess.run(command, check=True)
 
         size = subprocess.run(["du", "-h", dst], capture_output=True,
                               text=True).stdout.split("\t")[0]

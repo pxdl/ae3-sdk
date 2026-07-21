@@ -43,6 +43,7 @@ Usage:
   ae3 sbt2srt --data DATA.BIN --all --out extracted/fmv/subs
 """
 import argparse
+import math
 import os
 import struct
 import sys
@@ -52,64 +53,116 @@ REC_SIZE = 0x18
 
 def srt_time(t):
     if t < 0:
-        t = 0.0
-    h = int(t // 3600); m = int(t % 3600 // 60); s = int(t % 60)
-    ms = int(round((t - int(t)) * 1000))
-    if ms == 1000:
-        s += 1; ms = 0
+        raise ValueError(f"negative subtitle timestamp {t}")
+    total_ms = round(t * 1000)
+    h, remainder = divmod(total_ms, 3_600_000)
+    m, remainder = divmod(remainder, 60_000)
+    s, ms = divmod(remainder, 1000)
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
+def _require_range(data, offset, size, label):
+    if offset < 0 or size < 0 or offset + size > len(data):
+        raise ValueError(
+            f"{label} range 0x{offset:x}..0x{offset + size:x} exceeds "
+            f"0x{len(data):x}-byte file")
+
+
 def parse_sbt(d):
+    _require_range(d, 0, 0x10, "sbt header")
     if d[:4] != b"sbt\0":
         raise ValueError("bad sbt magic")
     n = struct.unpack_from("<I", d, 4)[0]
+    expected_size = 0x10 + n * 0x10
+    if expected_size != len(d):
+        raise ValueError(f"sbt size {len(d)} != 0x10 + {n}*0x10")
     first, total = struct.unpack_from("<2f", d, 8)
-    if 0x10 + n * 0x10 != len(d):
-        print(f"  ! sbt size {len(d)} != 0x10 + {n}*0x10", file=sys.stderr)
+    if not math.isfinite(first) or not math.isfinite(total) or first < 0 or total < first:
+        raise ValueError(f"invalid sbt range {first}..{total}")
+
     out = []
+    previous_start = -1.0
     for i in range(n):
-        idx, _z, a, b = struct.unpack_from("<IIff", d, 0x10 + i * 0x10)
-        out.append((idx, a, b))
+        idx, zero, start, end = struct.unpack_from("<IIff", d, 0x10 + i * 0x10)
+        if idx != i:
+            raise ValueError(f"sbt cue {i} has index {idx}")
+        if zero != 0:
+            raise ValueError(f"sbt cue {i} reserved word is 0x{zero:08x}")
+        if (not math.isfinite(start) or not math.isfinite(end) or
+                start < 0 or start > end or end > total or start < previous_start):
+            raise ValueError(f"sbt cue {i} has invalid range {start}..{end}")
+        out.append((idx, start, end))
+        previous_start = start
+    if out and not math.isclose(first, out[0][1], rel_tol=0, abs_tol=1e-5):
+        raise ValueError(f"sbt first timestamp {first} != cue 0 start {out[0][1]}")
     return out, total
 
 
 def parse_bin(d):
+    _require_range(d, 0, 0x28, "bin header")
     magic, n = struct.unpack_from("<2I", d, 0)
     if magic != 0x72312487:
         raise ValueError(f"bad bin magic 0x{magic:08x}")
-    # section offsets are the u32s at +0x08, +0x10, +0x18, +0x20 (each followed by a 0)
-    _names, _index, records, text = (struct.unpack_from("<I", d, o)[0]
-                                     for o in (0x08, 0x10, 0x18, 0x20))
+    section_words = [struct.unpack_from("<2I", d, o) for o in (0x08, 0x10, 0x18, 0x20)]
+    if any(zero != 0 for _, zero in section_words):
+        raise ValueError("bin section offset has a nonzero reserved word")
+    names, index, records, text = (offset for offset, _ in section_words)
+    if not (0x28 <= names <= index <= records <= text <= len(d)):
+        raise ValueError(
+            f"invalid bin section order 0x{names:x}, 0x{index:x}, "
+            f"0x{records:x}, 0x{text:x}")
+    _require_range(d, names, n * 0x28, "bin names")
+    _require_range(d, index, n * 0x08, "bin index")
+    _require_range(d, records, n * REC_SIZE, "bin records")
+
     out = []
     for i in range(n):
-        off = struct.unpack_from("<I", d, records + i * REC_SIZE + 0x14)[0]
-        end = d.find(b"\0", text + off)
-        # strict: a decode error means the codec assumption is wrong, and we want to hear
-        # about it rather than paper over it with replacement glyphs.
-        s = d[text + off:end].decode("utf-8")
-        # Drop the game's vertical-alignment spacer lines (lone U+3000). Keep real text.
-        lines = [ln for ln in s.split("\n") if ln.strip("　 \t")]
+        record = records + i * REC_SIZE
+        off = struct.unpack_from("<I", d, record + 0x14)[0]
+        start = text + off
+        _require_range(d, start, 1, f"bin string {i}")
+        end = d.find(b"\0", start)
+        if end < 0:
+            raise ValueError(f"bin string {i} at 0x{start:x} is not NUL-terminated")
+        try:
+            value = d[start:end].decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"bin string {i} has invalid UTF-8 at 0x{start + error.start:x}") from error
+        lines = [line for line in value.split("\n") if line.strip("　 \t")]
         out.append("\n".join(lines))
     return out
 
 
-def convert(name, binp, sbtp, outdir):
-    times, total = parse_sbt(open(sbtp, "rb").read())
-    texts = parse_bin(open(binp, "rb").read())
+def render_srt(times, texts):
     if len(times) != len(texts):
-        print(f"  ! {name}: {len(times)} timings vs {len(texts)} strings", file=sys.stderr)
-    n = min(len(times), len(texts))
-    lines = []
-    for i in range(n):
-        _idx, a, b = times[i]
-        lines.append(f"{i+1}\n{srt_time(a)} --> {srt_time(b)}\n{texts[i]}\n")
+        raise ValueError(f"{len(times)} timings != {len(texts)} strings")
+    cues = []
+    for i, ((_idx, start, end), text) in enumerate(zip(times, texts), 1):
+        cues.append(f"{i}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
+    return "\n".join(cues)
+
+
+def convert_bytes(bin_data, sbt_data):
+    times, total = parse_sbt(sbt_data)
+    texts = parse_bin(bin_data)
+    return render_srt(times, texts), times, total
+
+
+def convert(name, binp, sbtp, outdir):
+    with open(binp, "rb") as stream:
+        bin_data = stream.read()
+    with open(sbtp, "rb") as stream:
+        sbt_data = stream.read()
+    rendered, times, total = convert_bytes(bin_data, sbt_data)
     os.makedirs(outdir, exist_ok=True)
-    p = os.path.join(outdir, name + ".srt")
-    with open(p, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    print(f"  {name}: {n} subtitles, last ends {times[n-1][2]:.2f}s (sbt total {total:.2f}s)")
-    return p
+    path = os.path.join(outdir, name + ".srt")
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(rendered)
+    last_end = times[-1][2] if times else 0.0
+    print(f"  {name}: {len(times)} subtitles, last ends {last_end:.2f}s "
+          f"(sbt total {total:.2f}s)")
+    return path
 
 
 def main():

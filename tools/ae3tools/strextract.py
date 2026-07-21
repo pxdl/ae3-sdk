@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract FMVs from Ape Escape 3's `.str` movie container (debug/us/movie/*.str).
 
-  DATA.BIN  ──VFI──>  debug/us/movie/*.str      "str\\0" container, 24 movies
+  DATA.BIN  ──VFI──>  debug/us/movie/*.str      "str\\0" container, 22 movies
                         ├─ MPEG-2 elementary video  (chunked, tag "Mpeg2Video")
                         └─ PS-ADPCM audio           (untagged, in the chunk gaps)
 
@@ -27,10 +27,10 @@ GroupOfDataInfo payload is u32[4] = (fields_in_group, video_chunks_in_group, ?, 
 third word does not match this group's video *or* audio byte count and is left unnamed --
 nothing here needs it. See docs/formats/FMV.md for how the rest was cross-checked.
 
-AUDIO. Each gap is `hdr.audio_blk` (0x4000) bytes of ADPCM followed by padding to the next
-0x800 sector -- the gaps vary in length, the audio in them does not. The last group carries
-no audio. This is not a guess: hdr.audio_total == preload + (groups-1) * audio_blk exactly
-(0x44000 == 0x10000 + 13*0x4000), and the shortest gap in the file is exactly 0x4000.
+AUDIO. Each gap is zero padding followed by `hdr.audio_blk` (0x4000) bytes of ADPCM, with
+the audio end-aligned against the next chunk. The gaps vary in length; the audio payload
+does not. The last group carries no audio. This is not a guess: hdr.audio_total equals
+preload + (groups-1) * audio_blk exactly, and every byte before each audio payload is zero.
 Channels are interleaved in hdr.interleave (0x400) byte blocks; ADPCM predictor state is
 per-channel and must persist across blocks.
 
@@ -49,14 +49,20 @@ never under assets/. Do NOT redistribute any extracted asset with the recreation
 Usage:
   tools/strextract.py --list
   ae3 strextract --data DATA.BIN --glob 'new_scene01' --out extracted/fmv
-  ae3 strextract --data DATA.BIN --all --out extracted/fmv --mp4
+  ae3 strextract --data DATA.BIN --all --out extracted/fmv --mkv
 """
 import argparse
+import math
 import os
 import re
 import struct
 import subprocess
 import sys
+
+try:
+    from .sbt2srt import convert_bytes
+except ImportError:
+    from sbt2srt import convert_bytes
 
 SECTOR = 2048
 TAGS = (b"Mpeg2Video", b"GroupOfDataInfo")
@@ -69,8 +75,12 @@ class Hdr:
     """The 0x38-byte `.str` header. Names for words we have evidence for; rest stays raw."""
 
     def __init__(self, d: bytes):
+        if len(d) < SECTOR:
+            raise ValueError(f"truncated str header sector: {len(d)} bytes")
         if d[:4] != b"str\0":
             raise ValueError("not a str container (bad magic)")
+        if any(d[0x38:SECTOR]):
+            raise ValueError("nonzero padding in str header sector at 0x38")
         w = struct.unpack_from("<14I", d, 0)
         self.fields = w[2]          # +0x08 total FIELDS (not frames) -- == sum of group counts
         self.field_rate = w[3]      # +0x0c 5994 = 59.94Hz field rate -> 29.97 fps
@@ -81,6 +91,20 @@ class Hdr:
         self.audio_blk = w[11]      # +0x2c audio bytes per group gap (0x4000)
         self.preload = w[12]        # +0x30 audio preload before the first group (0x10000)
         self.audio_total = w[13]    # +0x34 total audio bytes == preload + (groups-1)*audio_blk
+        if not all((self.fields, self.field_rate, self.groups, self.rate, self.channels,
+                    self.interleave, self.audio_blk, self.preload, self.audio_total)):
+            raise ValueError("zero value in required str header field")
+        channel_group = self.interleave * self.channels
+        if self.interleave % 16 or self.audio_blk % channel_group or self.preload % channel_group:
+            raise ValueError("invalid channel/interleave arithmetic in str header")
+        expected_audio = self.preload + (self.groups - 1) * self.audio_blk
+        if self.audio_total != expected_audio:
+            raise ValueError(
+                f"declared audio total {self.audio_total} != preload/group total "
+                f"{expected_audio}")
+        if SECTOR + self.preload > len(d):
+            raise ValueError(
+                f"audio preload ends at 0x{SECTOR + self.preload:x}, past EOF 0x{len(d):x}")
 
     @property
     def fps(self):
@@ -93,9 +117,12 @@ class Hdr:
 
 def decode_adpcm(data: bytes) -> bytes:
     """PS-ADPCM -> signed 16-bit PCM. 16-byte frames, 28 samples each."""
-    out = bytearray()
+    if len(data) % 16:
+        raise ValueError(f"ADPCM length {len(data)} is not a whole number of frames")
+    out = bytearray(len(data) // 16 * 28 * 2)
+    write = 0
     s1 = s2 = 0
-    for p in range(0, len(data) - 15, 16):
+    for p in range(0, len(data), 16):
         hdr = data[p]
         shift, filt = hdr & 0x0F, (hdr >> 4) & 0x0F
         if shift > 12:      # SPU treats an out-of-range shift as 9
@@ -106,108 +133,229 @@ def decode_adpcm(data: bytes) -> bytes:
         for i in range(14):
             b = data[p + 2 + i]
             for nib in (b & 0x0F, b >> 4):          # low nibble first
-                s = nib << 12
-                if s & 0x8000:                       # sign-extend the 4-bit sample
-                    s -= 0x10000
-                s >>= shift
-                s += (s1 * f0 + s2 * f1) >> 6
-                s = max(-32768, min(32767, s))
-                out += struct.pack("<h", s)
-                s2, s1 = s1, s
+                sample = nib << 12
+                if sample & 0x8000:                  # sign-extend the 4-bit sample
+                    sample -= 0x10000
+                sample >>= shift
+                sample += (s1 * f0 + s2 * f1) >> 6
+                sample = max(-32768, min(32767, sample))
+                struct.pack_into("<h", out, write, sample)
+                write += 2
+                s2, s1 = s1, sample
     return bytes(out)
 
 
 def wav(pcm_per_ch, rate):
     """Interleave per-channel PCM and wrap in a RIFF header."""
+    if not pcm_per_ch or any(len(pcm) != len(pcm_per_ch[0]) for pcm in pcm_per_ch):
+        raise ValueError("PCM channels have unequal lengths")
     ch = len(pcm_per_ch)
-    n = min(len(p) for p in pcm_per_ch) // 2
-    body = bytearray()
-    for i in range(n):
-        for c in range(ch):
-            body += pcm_per_ch[c][i * 2:i * 2 + 2]
-    ba = rate * ch * 2
+    samples = len(pcm_per_ch[0]) // 2
+    body = bytearray(samples * ch * 2)
+    write = 0
+    for i in range(samples):
+        for pcm in pcm_per_ch:
+            body[write:write + 2] = pcm[i * 2:i * 2 + 2]
+            write += 2
+    byte_rate = rate * ch * 2
     return (b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt " +
-            struct.pack("<IHHIIHH", 16, 1, ch, rate, ba, ch * 2, 16) +
+            struct.pack("<IHHIIHH", 16, 1, ch, rate, byte_rate, ch * 2, 16) +
             b"data" + struct.pack("<I", len(body)) + bytes(body))
 
 
+def _chunk(d, off, expected_tag):
+    if off + 32 > len(d):
+        raise ValueError(f"truncated {expected_tag.decode()} header at 0x{off:x}")
+    tag = d[off:off + 16].rstrip(b"\0")
+    if tag != expected_tag:
+        raise ValueError(
+            f"expected {expected_tag.decode()} at 0x{off:x}, found {tag!r}")
+    _index, size, reserved0, reserved1 = struct.unpack_from("<4I", d, off + 16)
+    if reserved0 or reserved1:
+        raise ValueError(f"nonzero chunk reserved word at 0x{off + 0x18:x}")
+    payload = off + 32
+    padded_end = payload + ((size + 15) & ~15)
+    if payload + size > len(d) or padded_end > len(d):
+        raise ValueError(
+            f"truncated {expected_tag.decode()} payload at 0x{payload:x}: "
+            f"{size} bytes exceed EOF 0x{len(d):x}")
+    if any(d[payload + size:padded_end]):
+        raise ValueError(f"nonzero chunk padding at 0x{payload + size:x}")
+    return d[payload:payload + size], padded_end
+
+
 def demux(d: bytes):
-    """Walk the chunk table. Returns (hdr, video_es, audio_bytes, groups)."""
+    """Walk and fully validate the chunk table. Returns (hdr, video, audio, groups)."""
     h = Hdr(d)
-    video, audio, groups = bytearray(), bytearray(d[SECTOR:SECTOR + h.preload]), []
+    video_parts = []
+    audio_parts = [d[SECTOR:SECTOR + h.preload]]
+    groups = []
+    video_chunks = 0
     off = SECTOR + h.preload
-    while off < len(d) - 32:
-        tag = d[off:off + 16].rstrip(b"\0")
-        if not (tag and all(32 <= b < 127 for b in tag)):
-            # Untagged: an audio gap, laid out [zero padding][audio_blk of ADPCM] so the
-            # audio ENDS flush against the next chunk. The padding LEADS -- reading
-            # audio_blk from the start of the gap instead injects a burst of silence and
-            # truncates real samples once per group (~0.3s), which is audible as stutter.
-            nxt = min((x for x in (d.find(t, off) for t in TAGS) if x > 0), default=len(d))
-            blk = min(h.audio_blk, nxt - off)          # this gap's audio, end-aligned
-            want = min(blk, h.audio_total - len(audio))  # never exceed the declared total
-            if want > 0:
-                audio += d[nxt - blk:nxt - blk + want]
-            off = nxt
-            continue
-        idx, size = struct.unpack_from("<II", d, off + 16)
-        if tag == b"Mpeg2Video":
-            video += d[off + 32:off + 32 + size]
-        elif tag == b"GroupOfDataInfo":
-            groups.append(struct.unpack_from("<4I", d, off + 32))
-        off += 32 + ((size + 15) & ~15)
-    return h, bytes(video), bytes(audio), groups
 
+    for group_index in range(h.groups):
+        payload, off = _chunk(d, off, b"GroupOfDataInfo")
+        if len(payload) != 16:
+            raise ValueError(
+                f"group {group_index} payload is {len(payload)} bytes instead of 16")
+        group = struct.unpack("<4I", payload)
+        if group[3] != 0:
+            raise ValueError(f"group {group_index} reserved word is 0x{group[3]:08x}")
+        groups.append(group)
 
-def extract(name, blob, outdir, mp4=False, quiet=False):
-    h, video, audio, groups = demux(blob)
+        for _ in range(group[1]):
+            payload, off = _chunk(d, off, b"Mpeg2Video")
+            video_parts.append(payload)
+            video_chunks += 1
 
-    # Consistency checks -- these are what proved the layout; keep them enforced.
-    n_fields = sum(g[0] for g in groups)
-    if n_fields != h.fields:
-        print(f"  ! {name}: group fields {n_fields} != header {h.fields}", file=sys.stderr)
+        if group_index < h.groups - 1:
+            next_group = d.find(b"GroupOfDataInfo\0", off)
+            if next_group < 0:
+                raise ValueError(
+                    f"group {group_index} has no following group after 0x{off:x}")
+            gap_size = next_group - off
+            if gap_size < h.audio_blk:
+                raise ValueError(
+                    f"audio gap at 0x{off:x} is {gap_size} bytes, "
+                    f"smaller than {h.audio_blk}")
+            padding_end = next_group - h.audio_blk
+            if any(d[off:padding_end]):
+                raise ValueError(f"nonzero leading audio-gap padding at 0x{off:x}")
+            audio_parts.append(d[padding_end:next_group])
+            off = next_group
+
+    if any(d[off:]):
+        raise ValueError(f"nonzero trailing data starts at 0x{off:x}")
     if len(groups) != h.groups:
-        print(f"  ! {name}: {len(groups)} groups != header {h.groups}", file=sys.stderr)
+        raise ValueError(f"walked {len(groups)} groups, header declares {h.groups}")
+    fields = sum(group[0] for group in groups)
+    if fields != h.fields:
+        raise ValueError(f"group fields {fields} != header {h.fields}")
+    declared_chunks = sum(group[1] for group in groups)
+    if video_chunks != declared_chunks:
+        raise ValueError(f"walked {video_chunks} video chunks, groups declare {declared_chunks}")
+
+    audio = b"".join(audio_parts)
+    if len(audio) != h.audio_total:
+        raise ValueError(f"walked {len(audio)} audio bytes, header declares {h.audio_total}")
+    return h, b"".join(video_parts), audio, groups
+
+
+def _display_aspect(m2v):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", m2v],
+        capture_output=True, text=True, check=True)
+    try:
+        width, height = (int(value) for value in result.stdout.strip().split(",")[:2])
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"ffprobe returned invalid dimensions: {result.stdout!r}") from error
+    divisor = math.gcd(width * 7, height * 6)
+    return width * 7 // divisor, height * 6 // divisor
+
+
+def _read_exact(stream, offset, size, label):
+    stream.seek(offset)
+    data = stream.read(size)
+    if len(data) != size:
+        raise ValueError(
+            f"{label}: read {len(data)} bytes at 0x{offset:x}, expected {size}")
+    return data
+
+
+def _subtitle_key(movie_name):
+    match = re.fullmatch(r"new_(scene\d\d)", movie_name)
+    return match.group(1) if match else None
+
+
+def _write_subtitle(movie_name, entries, stream, outdir):
+    key = _subtitle_key(movie_name)
+    if key is None:
+        return None
+    paths = [f"debug/us/movie/{key}{extension}" for extension in (".bin", ".sbt")]
+    present = [path in entries for path in paths]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ValueError(f"{movie_name}: incomplete subtitle pair for {key}")
+    bin_data = _read_exact(stream, *entries[paths[0]], paths[0])
+    sbt_data = _read_exact(stream, *entries[paths[1]], paths[1])
+    rendered, _times, _total = convert_bytes(bin_data, sbt_data)
+    subtitle_dir = os.path.join(outdir, "subs")
+    os.makedirs(subtitle_dir, exist_ok=True)
+    path = os.path.join(subtitle_dir, key + ".srt")
+    with open(path, "w", encoding="utf-8", newline="\n") as output:
+        output.write(rendered)
+    return path
+
+
+def extract(name, blob, outdir, mkv=False, subtitle=None, quiet=False):
+    try:
+        h, video, audio, _groups = demux(blob)
+    except ValueError as error:
+        raise ValueError(f"{name}: {error}") from error
 
     os.makedirs(outdir, exist_ok=True)
     m2v = os.path.join(outdir, name + ".m2v")
-    with open(m2v, "wb") as f:
-        f.write(video)
+    with open(m2v, "wb") as stream:
+        stream.write(video)
 
     # Deinterleave -> per-channel ADPCM -> PCM. State is per channel, so decode each
     # channel's blocks as one continuous stream.
-    ch = h.channels
-    streams = [bytearray() for _ in range(ch)]
-    blk = h.interleave
-    for i in range(0, len(audio) - blk + 1, blk * ch):
-        for c in range(ch):
-            streams[c] += audio[i + c * blk:i + (c + 1) * blk]
-    pcm = [decode_adpcm(bytes(s)) for s in streams]
-    wavp = os.path.join(outdir, name + ".wav")
-    with open(wavp, "wb") as f:
-        f.write(wav(pcm, h.rate))
+    channels = h.channels
+    block = h.interleave
+    channel_group = block * channels
+    if len(audio) % channel_group:
+        raise ValueError(
+            f"{name}: audio length {len(audio)} is not divisible by "
+            f"{channels} channels x {block}-byte interleave")
+    streams = [bytearray(len(audio) // channels) for _ in range(channels)]
+    write_offsets = [0] * channels
+    for offset in range(0, len(audio), channel_group):
+        for channel in range(channels):
+            start = offset + channel * block
+            write = write_offsets[channel]
+            streams[channel][write:write + block] = audio[start:start + block]
+            write_offsets[channel] += block
+    pcm = [decode_adpcm(bytes(stream)) for stream in streams]
+    wav_path = os.path.join(outdir, name + ".wav")
+    with open(wav_path, "wb") as stream:
+        stream.write(wav(pcm, h.rate))
 
-    asec = min(len(p) for p in pcm) / 2 / h.rate
+    audio_seconds = len(pcm[0]) / 2 / h.rate
     if not quiet:
         print(f"  {name}: {h.fields} fields / {h.fps:.2f}fps = {h.duration:.2f}s | "
-              f"video {len(video):,}B | audio {len(audio):,}B -> {asec:.2f}s {h.rate}Hz x{ch}")
+              f"video {len(video):,}B | audio {len(audio):,}B -> "
+              f"{audio_seconds:.2f}s {h.rate}Hz x{channels}")
 
-    if mp4:
-        out = os.path.join(outdir, name + ".mkv")
-        # -c:v copy: keep Sony's original MPEG-2 bitstream bit-exact, no second generation
-        # of loss. A raw ES carries no timestamps, so -r states the rate and +genpts
-        # synthesises the PTS the muxer refuses to write packets without.
-        # -shortest drops the audio tail still sitting in the stream buffer when video ends.
-        r = subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
-             "-r", f"{h.field_rate}/200", "-i", m2v, "-i", wavp,
-             "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "flac",
-             "-fps_mode", "passthrough", "-shortest", out],
-            capture_output=True, text=True)
-        if r.returncode:
-            print(f"  ! {name}: ffmpeg failed: {r.stderr.strip()[:200]}", file=sys.stderr)
-        elif not quiet:
-            print(f"      -> {os.path.basename(out)} ({os.path.getsize(out):,}B)")
+    if not mkv:
+        return
+
+    aspect_width, aspect_height = _display_aspect(m2v)
+    output_path = os.path.join(outdir, name + ".mkv")
+    command = [
+        "ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
+        "-r", f"{h.field_rate}/200", "-i", m2v, "-i", wav_path,
+    ]
+    if subtitle:
+        command.extend(["-i", subtitle])
+    command.extend([
+        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "flac",
+        "-aspect", f"{aspect_width}:{aspect_height}",
+        "-fps_mode", "passthrough", "-shortest",
+    ])
+    if subtitle:
+        command.extend([
+            "-map", "2:s", "-c:s", "srt",
+            "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default",
+        ])
+    command.append(output_path)
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"{name}: ffmpeg failed: {result.stderr.strip()}")
+    if not quiet:
+        print(f"      -> {os.path.basename(output_path)} "
+              f"({os.path.getsize(output_path):,}B)")
 
 
 def main():
@@ -219,14 +367,21 @@ def main():
     ap.add_argument("--glob", help="substring match on the movie name")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--list", action="store_true")
-    ap.add_argument("--mp4", action="store_true", help="also mux to .mp4 via ffmpeg")
+    ap.add_argument("--mkv", action="store_true",
+                    help="also mux a lossless MPEG-2/FLAC/SubRip .mkv via ffmpeg")
     a = ap.parse_args()
 
+    entries = {}
     movies = []
-    for line in open(a.manifest):
-        p = line.rstrip("\n").split("\t")
-        if len(p) >= 4 and p[0].startswith("debug/us/movie/") and p[0].endswith(".str"):
-            movies.append((os.path.basename(p[0])[:-4], int(p[2]), int(p[3])))
+    with open(a.manifest, encoding="utf-8") as manifest:
+        for line in manifest:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 4 or not parts[2].isdigit() or not parts[3].isdigit():
+                continue
+            path = parts[0]
+            entries[path] = (int(parts[2]), int(parts[3]))
+            if path.startswith("debug/us/movie/") and path.endswith(".str"):
+                movies.append((os.path.basename(path)[:-4], *entries[path]))
 
     if a.list:
         for n, off, sz in movies:
@@ -239,10 +394,11 @@ def main():
         print("nothing selected (use --all, --glob, or --list)", file=sys.stderr)
         sys.exit(1)
 
-    with open(a.data, "rb") as f:
-        for n, off, sz in todo:
-            f.seek(off)
-            extract(n, f.read(sz), a.out, mp4=a.mp4)
+    with open(a.data, "rb") as stream:
+        for name, offset, size in todo:
+            blob = _read_exact(stream, offset, size, name + ".str")
+            subtitle = _write_subtitle(name, entries, stream, a.out) if a.mkv else None
+            extract(name, blob, a.out, mkv=a.mkv, subtitle=subtitle)
 
 
 if __name__ == "__main__":
