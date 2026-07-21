@@ -10,7 +10,8 @@ import {
     BytesSource, Iso9660, systemCnfSerial, Vfi, inflateSz,
     unpackPck, memberBytes, typeOf, attrsOf, safeMember, pckFileNames,
     parseExdb, bgmDescRecords, bgmSongTable, natcmp, sniff, openDisc,
-    locateFmvAssets, parseFmvHeader, demuxFmv, parseFmvSubtitles,
+    locateFmvAssets, parseFmvHeader, inspectFmvPrefix, inspectFmvAsset,
+    demuxFmv, indexMpeg2SeekPoints, parseFmvSubtitles,
     subtitlesToSrt, subtitlesToVtt,
 } from "../src/index.ts";
 import {
@@ -68,6 +69,14 @@ test("fmv: region-tolerant discovery, subtitle pairing, blank sentinel", async (
     assert.equal(assets[1].subtitleBin?.name, "scene01.bin");
     assert.equal(assets[1].subtitleSbt?.name, "scene01.sbt");
     assert.ok(!assets.some(asset => asset.name.includes("blank")));
+    assert.deepEqual((await inspectFmvAsset(vfi, assets[0].movie)).videoInfo, {
+        width: 512,
+        height: 320,
+        frameRate: 30000 / 1001,
+        fieldOrder: "progressive",
+        sampleAspect: [7, 6],
+        displayAspect: [28, 15],
+    });
 });
 
 test("fmv: progressive demux, odd fields, audio alignment and predictor history", () => {
@@ -76,6 +85,17 @@ test("fmv: progressive demux, odd fields, audio alignment and predictor history"
     assert.equal(header.fields, 3);
     assert.equal(header.fieldRate, 59.94);
     assert.equal(header.audioBytes, 64);
+    assert.deepEqual(inspectFmvPrefix(fixture.bytes, "fixture"), {
+        header,
+        videoInfo: {
+            width: 512,
+            height: 320,
+            frameRate: 30000 / 1001,
+            fieldOrder: "progressive",
+            sampleAspect: [7, 6],
+            displayAspect: [28, 15],
+        },
+    });
 
     const fmv = demuxFmv(fixture.bytes, "fixture");
     assert.deepEqual(fmv.video, fixture.video);
@@ -100,6 +120,38 @@ test("fmv: top- and bottom-field metadata come from MPEG extensions", () => {
         .videoInfo.fieldOrder, "tt");
     assert.equal(demuxFmv(buildFmv({ progressive: false, topFieldFirst: false }).bytes)
         .videoInfo.fieldOrder, "bb");
+});
+
+test("fmv: MPEG seek index anchors every sequence/GOP/I-picture", () => {
+    const start = (code, payload = []) => bytes(0, 0, 1, code, ...payload);
+    const sequence0 = start(0xb3, [1]);
+    const gop0 = start(0xb8);
+    const i0 = start(0x00, [0, 0x08]);
+    const p0 = start(0x00, [0, 0x10]);
+    const b0 = start(0x00, [0, 0x18]);
+    const sequence1 = start(0xb3, [2]);
+    const gop1 = start(0xb8);
+    const i1 = start(0x00, [0, 0x08]);
+    const stream = Uint8Array.from([
+        ...sequence0, ...gop0, ...i0, ...p0, ...b0,
+        ...sequence1, ...gop1, ...i1, ...start(0xb7),
+    ]);
+    assert.deepEqual(indexMpeg2SeekPoints(stream, "fixture"), {
+        frames: 4,
+        points: [
+            { offset: 0, frame: 0 },
+            {
+                offset: sequence0.length + gop0.length + i0.length
+                    + p0.length + b0.length,
+                frame: 3,
+            },
+        ],
+    });
+    assert.throws(
+        () => indexMpeg2SeekPoints(
+            Uint8Array.from([...gop0, ...i0, ...start(0xb7)]), "fixture"),
+        /missing initial sequence\/GOP\/I-picture seek anchor/,
+    );
 });
 
 test("fmv: malformed offsets, padding and truncation fail hard", () => {

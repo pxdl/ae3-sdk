@@ -51,6 +51,16 @@ export interface FmvVideoInfo {
     displayAspect: readonly [number, number];
 }
 
+export interface Mpeg2SeekPoint {
+    offset: number;
+    frame: number;
+}
+
+export interface Mpeg2SeekIndex {
+    frames: number;
+    points: readonly Mpeg2SeekPoint[];
+}
+
 export interface FmvGroup {
     fields: number;
     videoChunks: number;
@@ -301,6 +311,51 @@ function startCodes(video: Uint8Array): { code: number; payload: Uint8Array; off
     return codes;
 }
 
+export function indexMpeg2SeekPoints(video: Uint8Array,
+                                     source = "MPEG-2"): Mpeg2SeekIndex {
+    const points: Mpeg2SeekPoint[] = [];
+    let sequenceOffset = -1;
+    let gopOffset = -1;
+    let frames = 0;
+    for (const item of startCodes(video)) {
+        if (item.code === 0xb3) {
+            sequenceOffset = item.offset;
+            gopOffset = -1;
+            continue;
+        }
+        if (item.code === 0xb8) {
+            gopOffset = item.offset;
+            continue;
+        }
+        if (item.code !== 0x00) continue;
+
+        const bits = new BitReader(item.payload);
+        let temporalReference: number;
+        let pictureType: number;
+        try {
+            temporalReference = bits.read(10);
+            pictureType = bits.read(3);
+        } catch (error) {
+            fail(source, item.offset, (error as Error).message);
+        }
+        if (pictureType! < 1 || pictureType! > 3)
+            fail(source, item.offset, `unsupported MPEG picture type ${pictureType!}`);
+        if (pictureType === 1 && sequenceOffset >= 0 && gopOffset > sequenceOffset) {
+            if (temporalReference! !== 0)
+                fail(source, item.offset,
+                     `indexed I-picture temporal reference ${temporalReference!} is not zero`);
+            points.push({ offset: sequenceOffset, frame: frames });
+            sequenceOffset = -1;
+            gopOffset = -1;
+        }
+        frames++;
+    }
+    if (frames === 0) fail(source, 0, "missing MPEG picture headers");
+    if (points.length === 0 || points[0].frame !== 0)
+        fail(source, 0, "missing initial sequence/GOP/I-picture seek anchor");
+    return { frames, points };
+}
+
 export function parseMpeg2VideoInfo(video: Uint8Array, source = "MPEG-2"): FmvVideoInfo {
     const codes = startCodes(video);
     const sequence = codes.find(item => item.code === 0xb3);
@@ -366,6 +421,50 @@ export function parseMpeg2VideoInfo(video: Uint8Array, source = "MPEG-2"): FmvVi
         sampleAspect: [7, 6],
         displayAspect: [width! * 7 / divisor, height! * 6 / divisor],
     };
+}
+
+/** Inspect the header and first video chunk without reading the full movie.
+ *  The caller must provide a prefix through that complete chunk. */
+export function inspectFmvPrefix(bytes: Uint8Array, source = "FMV"):
+        { header: FmvHeader; videoInfo: FmvVideoInfo } {
+    const header = parseFmvHeader(bytes, source);
+    requireRange(bytes, SECTOR, header.preload, source, "audio preload");
+    const group = readChunk(bytes, SECTOR + header.preload, GROUP_TAG, source);
+    if (group.range.size !== 16)
+        fail(source, group.range.start,
+             `group payload is ${group.range.size} bytes instead of 16`);
+    const videoChunks = u32(bytes, group.range.start + 4);
+    if (videoChunks === 0) fail(source, group.range.start + 4, "first group has no video");
+    const video = readChunk(bytes, group.next, VIDEO_TAG, source).range;
+    return {
+        header,
+        videoInfo: parseMpeg2VideoInfo(
+            bytes.subarray(video.start, video.start + video.size), `${source} video`),
+    };
+}
+
+/** Read only the bytes needed to inspect one movie in a VFI archive. */
+export async function inspectFmvAsset(vfi: Vfi, movie: VfiEntry,
+                                     source = movie.path):
+        Promise<{ header: FmvHeader; videoInfo: FmvVideoInfo }> {
+    const base = vfi.byteOffset(movie);
+    const headerBytes = await vfi.src.read(base, SECTOR);
+    const header = parseFmvHeader(headerBytes, source);
+    const groupOffset = SECTOR + header.preload;
+    const skeleton = await vfi.src.read(base + groupOffset, 80);
+    requireRange(skeleton, 0, 80, source, "first group and video headers");
+    const videoSize = u32(skeleton, 48 + 0x14);
+    const prefixSize = groupOffset + 48 + 32 + Math.ceil(videoSize / 16) * 16;
+    if (!Number.isSafeInteger(prefixSize)
+            || prefixSize < groupOffset || prefixSize > movie.size)
+        fail(source, groupOffset + 48 + 0x14,
+             `first video chunk ends at 0x${prefixSize.toString(16)}, `
+             + `past movie EOF 0x${movie.size.toString(16)}`);
+    const prefix = await vfi.src.read(base, prefixSize);
+    if (prefix.length !== prefixSize)
+        fail(source, prefix.length,
+             `short read (${prefix.length} of ${prefixSize} inspection bytes)`);
+    return inspectFmvPrefix(prefix, source);
 }
 
 function writeWavHeader(wav: Uint8Array, channels: number, sampleRate: number,
