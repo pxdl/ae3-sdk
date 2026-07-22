@@ -59,6 +59,44 @@ Lower-level pieces (`Iso9660`, `Vfi`, `inflateSz`, `unpackPck`, `parseExdb`,
 `bgmSongTable`, …) are exported individually; each is a direct port of its
 Python oracle in `tools/ae3tools/` and `docs/formats/` is the spec for both.
 
+## Bounded file CLI
+
+`bin/ae3-extract.mjs` exposes the same ISO/VFI parsers to local tooling without
+loading a disc image or `DATA.BIN` into memory. It accepts a versioned,
+data-free request and streams selected extents through bounded `FileHandle`
+reads:
+
+```json
+{
+  "schemaVersion": 1,
+  "iso": [
+    { "path": "SYSTEM.CNF", "output": "input/SYSTEM.CNF" }
+  ],
+  "vfi": [
+    {
+      "container": "DATA.BIN",
+      "path": "irx/3.0/sg2iopm1.irx",
+      "output": "input/sg2iopm1.irx"
+    }
+  ]
+}
+```
+
+```sh
+node bin/ae3-extract.mjs \
+  --iso /path/to/disc.iso \
+  --request request.json \
+  --output build/extracted \
+  --manifest build/locator.json
+node bin/ae3-extract.mjs --schema
+```
+
+The JSON manifest records schema version, source hashes, ISO/VFI byte locators,
+sizes, and SHA-1/SHA-256 for every extracted entry. Requests can name only ISO
+root files and traversal-free output/VFI paths. The CLI contains no
+title-specific hashes or paths; callers own target identity validation.
+
+
 ## Testing
 
 - `npm run typecheck` / `npm test` — the public gate: synthetic fixtures
@@ -69,5 +107,5 @@ Python oracle in `tools/ae3tools/` and `docs/formats/` is the spec for both.
   22-movie sets through this package, byte-compare MPEG/WAV/SRT outputs against
   the Python tools, and compare MPEG metadata with `ffprobe`.
 
-Node ≥ 23.6 (or any current browser toolchain) — the package is consumed as
+Node ≥ 24 (or any current browser toolchain) — the package is consumed as
 TypeScript source; there is no build step.
