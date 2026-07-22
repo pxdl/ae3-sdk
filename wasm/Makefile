@@ -4,10 +4,10 @@
 # (no document, no fetch of glue scripts) and under Node for the bit-exactness
 # harness -- the thin binding in js/ae3synth.mjs is the only JS involved.
 #
-# Bit-exactness stance (WEB_PORT_PLAN §1): WASM MVP has no FMA, so the
-# -ffp-contract=off discipline is the platform default here; keep the flag pinned
-# anyway (it governs the host-side compile of the doubles), and never enable
-# relaxed SIMD on this target -- it would reintroduce fused ops.
+# Bit-exactness stance: WASM MVP has no FMA, so the -ffp-contract=off discipline
+# is the platform default here; keep the flag pinned anyway (it governs the
+# host-side compile of the doubles), and never enable relaxed SIMD on this
+# target -- it would reintroduce fused ops.
 EMCC   ?= emcc
 CORE    = ../core
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -ffp-contract=off

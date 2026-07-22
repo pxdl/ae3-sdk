@@ -267,14 +267,17 @@ One stage (`toyhouse_c`) → 14 files → 5 PCKs → 125 `.i3d` + 78 `.tm2`, 7.6
 
 ---
 
-## 7. Open questions
+## 7. Scope boundary
 
-- **`I3D_BIN`** meshes: use/port the Noesis plugin. Skinning and `I3D_I3M` animation: unsolved.
-- The 15 odd `ape_lod_*.tm2` (2432 B, zeroed dimensions) — different sub-format or an offset bug.
-- `.plc` / `.luc` / `.asq` / `.rdi` / `navigation.pck` semantics — the level-script transforms
-  (which position non-`static` models), nav mesh, and collision.
-- Header `+0x18` "dummy" (used as `FOLDERS_OFF`), entry `+0x00` upper bits, and the use of
-  `INFO_END`.
+The VFI directory tree, member ranges, raw-deflate wrapper, and PCK extraction
+path used by the SDK are solved and corpus-gated. I3D model/animation/collision
+semantics and TIM2 edge cases are separate asset-family concerns rather than
+open VFI parser requirements.
+
+The SDK deliberately leaves unused metadata uninterpreted: header `+0x18`
+(`FOLDERS_OFF` in the observed reader), entry `+0x00` upper bits, and `INFO_END`.
+The `.plc`, `.luc`, `.asq`, `.rdi`, and `navigation.pck` consumers likewise sit
+outside this container contract.
 
 ---
 

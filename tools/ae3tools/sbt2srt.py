@@ -47,6 +47,7 @@ import math
 import os
 import struct
 import sys
+import tempfile
 
 REC_SIZE = 0x18
 
@@ -191,16 +192,15 @@ def main():
     if not a.all:
         print("use --all or --list", file=sys.stderr); sys.exit(1)
 
-    tmp = "/tmp/_sbt"
-    os.makedirs(tmp, exist_ok=True)
-    with open(a.data, "rb") as f:
+    with tempfile.TemporaryDirectory(prefix="ae3-sbt-") as tmp, open(a.data, "rb") as f:
         for k, v in sorted(pairs.items()):
             paths = {}
             for ext in (".bin", ".sbt"):
                 off, sz = v[ext]
                 f.seek(off)
                 paths[ext] = os.path.join(tmp, k + ext)
-                open(paths[ext], "wb").write(f.read(sz))
+                with open(paths[ext], "wb") as output:
+                    output.write(f.read(sz))
             convert(k, paths[".bin"], paths[".sbt"], a.out)
 
 

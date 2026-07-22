@@ -39,8 +39,9 @@ has no successor. Verified on 41633 non-final and 2074 final keys across all 106
 files: 100%, zero exceptions.
 
 comp3 on jnt_* tracks decodes as 4 x s16/32768 to a UNIT quaternion on 31844/31844
-referenced elements. HANDOFF.md recorded this reading as a dead end ("only ~1% of
-elements are unit-length"), but that test scored EVERY pool element in EVERY file --
+referenced elements. Earlier private research recorded this reading as a dead
+end ("only ~1% of elements are unit-length"), but that test scored EVERY pool
+element in EVERY file --
 mixing joint rotations with camera _path POSITIONS and with comp2 -- so it averaged three
 unrelated things. Scored per channel and per track kind, comp3 is exact.
 

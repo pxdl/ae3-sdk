@@ -17,9 +17,10 @@ database, model/animation, and FMV tooling:
   binding, render-identical to native (gated: synthetic vectors in CI, full
   corpus privately).
 - `extract-web/` — TypeScript browser-side extraction (`@ae3/extract`):
-  ISO9660 → DATA.BIN (VFI) → deflate/PCK → assets → OPFS cache, plus the Exdb
-  (BgmDesc) parser. Byte-identical to the Python extractor (gated: synthetic
-  fixtures in CI, full corpus privately).
+  ISO9660 → DATA.BIN (VFI) → deflate/PCK → assets → OPFS cache, plus Exdb
+  (BgmDesc), strict FMV/subtitle parsing, lightweight movie inspection, and
+  MPEG-2 seek indexing. Byte-identical to the Python extractor where gated
+  (synthetic fixtures in CI, full corpus privately).
 - `docs/formats/` — canonical format specifications (DATA.BIN/VFI, BGM, Exdb…)
   that every implementation here cites.
 

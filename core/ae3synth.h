@@ -370,10 +370,10 @@ void ae3_synth_clock(const ae3_synth *s, ae3_clock *out);
  * the same codec math as the bank decoder (voice.c), held bit-exact to the
  * offline oracle by the corpus gates.
  *
- * Non-goals (VIEWER_PLAN §1): no SPU voice/volume/pitch emulation (vol_l/
- * vol_r/rate are header metadata the player applies at output), no IOP
- * streaming/starve model, no loop playback beyond reporting the header
- * fields (all 1158 shipped files are one-shot). */
+ * Non-goals: no SPU voice/volume/pitch emulation (vol_l/vol_r/rate are header
+ * metadata the player applies at output), no IOP streaming/starve model, no
+ * loop playback beyond reporting the header fields (all 1158 shipped files
+ * are one-shot). */
 
 #define AE3_EXST_HDR    0x78
 #define AE3_EXST_SECTOR 2048
