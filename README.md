@@ -65,9 +65,11 @@ file or sector-by-sector stream decoding. See
 `extract-web/` is the TypeScript `@ae3/extract` package. It reads a plain
 2048-byte-sector ISO, walks ISO9660 and DATA.BIN, expands VFI, raw deflate, and
 PCK containers, and can cache extracted assets in OPFS. It also parses the BGM
-database, FMV containers, subtitle sidecars, display metadata, and MPEG-2 seek
-points. Catalog inspection can read movie metadata without loading the whole
-movie. See [`extract-web/README.md`](extract-web/README.md) for examples.
+database, TIM2 images, I3D models, skinning, skeletal animation, collision,
+FMV containers, subtitle sidecars, display metadata, and MPEG-2 seek points.
+Catalog inspection can read model skeleton names and movie metadata without
+loading unrelated assets. See [`extract-web/README.md`](extract-web/README.md)
+for examples.
 
 Both JavaScript package manifests are private. They are source packages for
 consumers that vendor or bundle them from this repository rather than published

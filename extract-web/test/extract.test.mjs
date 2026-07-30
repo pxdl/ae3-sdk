@@ -10,7 +10,8 @@ import {
     BytesSource, Iso9660, systemCnfSerial, Vfi, inflateSz,
     unpackPck, memberBytes, typeOf, attrsOf, safeMember, pckFileNames,
     inspectTim2, decodeTim2, locateImageContainers, scanImageTextures,
-    readImageTexture,
+    readImageTexture, locateModelContainers, scanModelAssets,
+    decodeI3dAnimation, decodeI3dCollision,
     parseExdb, bgmDescRecords, bgmSongTable, natcmp, sniff, openDisc,
     locateFmvAssets, parseFmvHeader, inspectFmvPrefix, inspectFmvAsset,
     demuxFmv, indexMpeg2SeekPoints, parseFmvSubtitles,
@@ -55,6 +56,16 @@ function buildTim2(pictures) {
         out.set(picture, offset);
         offset += picture.length;
     }
+    return out;
+}
+
+function buildEmptyI3d() {
+    const out = new Uint8Array(0x40);
+    const view = new DataView(out.buffer);
+    out.set(enc.encode("I3D_BIN\0"), 0);
+    view.setUint32(8, 0x00100001, true);
+    view.setUint32(0x10, 0x10, true);
+    view.setUint32(0x14, 0x52000000, true);
     return out;
 }
 
@@ -280,6 +291,99 @@ test("pck: members, attrs, naming rules", () => {
                       "cfg.exdb.exdb", "odd.bin"]);
 
     assert.equal(unpackPck(bytes(1, 2, 3, 4)), null);  // not a PCK
+});
+
+/* ---- I3D models, animation, collision ---------------------------------- */
+
+test("models: every I3D family member is catalogued with a stable source id", async () => {
+    const pck = buildPck([
+        { name: "hero", attrs: "i3r", data: buildEmptyI3d() },
+        { name: "run", attrs: "i3m", data: enc.encode("I3D_I3M\0payload") },
+        { name: "world", attrs: "i3c_s", data: enc.encode("I3D_I3C\0payload") },
+        { name: "diffuse", attrs: "tm2", data: enc.encode("TIM2payload") },
+    ]);
+    const vfi = await Vfi.open(new BytesSource(buildVfi([
+        { path: "stage/test/bg.pck", data: pck },
+    ])));
+    assert.equal(locateModelContainers(vfi).length, 1);
+    const assets = await scanModelAssets(vfi);
+    assert.deepEqual(assets.map(asset => [
+        asset.kind, asset.fileName, asset.memberIndex, asset.sourcePath,
+    ]), [
+        ["model", "hero.i3d", 0, "stage/test/bg.pck"],
+        ["animation", "run.i3m", 1, "stage/test/bg.pck"],
+        ["collision", "world.i3c", 2, "stage/test/bg.pck"],
+    ]);
+    assert.deepEqual(assets[0].boneNames, []);
+    assert.equal(new Set(assets.map(asset => asset.id)).size, 3);
+});
+
+test("i3m: named quaternion keys decode for realtime skeletal playback", () => {
+    const data = new Uint8Array(0x60);
+    const view = new DataView(data.buffer);
+    data.set(enc.encode("I3D_I3M\0"), 0);
+    view.setUint32(8, 0x00020001, true);
+    view.setUint32(0x0c, data.length, true);
+    view.setUint16(0x10, 7, true);
+    view.setUint16(0x12, 4, true);
+    view.setUint16(0x14, 1, true);
+    view.setUint16(0x16, 1, true);
+    view.setFloat32(0x18, 0, true);
+    view.setUint32(0x1c, 0x30, true);
+    view.setUint32(0x20, 0x50, true);
+    view.setUint32(0x24, 0x58, true);
+    view.setUint32(0x28, 0x50, true);
+    view.setUint32(0x30, 0x3c, true);
+    view.setUint16(0x34, 4, true);
+    view.setUint16(0x36, 1, true);
+    view.setUint32(0x38, 0x48, true);
+    data.set(enc.encode("jnt_root\0"), 0x3c);
+    view.setUint16(0x48, 0, true);
+    view.setUint16(0x4a, 1, true);
+    view.setUint16(0x4c, 0, true);
+    view.setUint16(0x4e, 0, true);
+    view.setInt16(0x56, 0x7fff, true);
+    const animation = decodeI3dAnimation(data);
+    assert.equal(animation.tracks[0].name, "jnt_root");
+    assert.deepEqual([...animation.tracks[0].times], [0]);
+    assert.deepEqual([...animation.tracks[0].rotations], [0, 0, 0, 1]);
+});
+
+test("i3c: BVH leaf triangles resolve their shared vertex array", () => {
+    const data = new Uint8Array(0xb4);
+    const view = new DataView(data.buffer);
+    data.set(enc.encode("I3D_I3C\0"), 0);
+    view.setUint32(8, 0x00030000, true);
+    view.setUint32(0x0c, data.length, true);
+    data[0x10] = 1;
+    view.setUint16(0x14, 1, true);
+    view.setUint16(0x16, 1, true);
+    view.setUint32(0x18, 0x20, true);
+    view.setUint32(0x1c, 0x2c, true);
+    view.setUint16(0x24, 1, true);
+    view.setUint32(0x28, 0x40, true);
+    view.setUint32(0x2c, 0x30, true);
+    data.set(enc.encode("coll_wall\0"), 0x30);
+    view.setFloat32(0x40, 0.5, true);
+    view.setFloat32(0x44, 0.5, true);
+    view.setFloat32(0x48, 0, true);
+    view.setFloat32(0x4c, 1, true);
+    view.setFloat32(0x50, 0.5, true);
+    view.setFloat32(0x54, 0.5, true);
+    view.setUint32(0x68, 0xa0, true);
+    view.setUint32(0x6c, 0x70, true);
+    const vertices = [[0, 0, 0], [1, 0, 0], [0, 1, 0]];
+    vertices.forEach((vertex, index) => vertex.forEach((value, axis) =>
+        view.setFloat32(0x70 + index * 0x10 + axis * 4, value, true)));
+    view.setUint16(0xa0, 0x8001, true);
+    view.setUint32(0xa8, 0xac, true);
+    view.setUint16(0xac, 0, true);
+    view.setUint16(0xae, 1, true);
+    view.setUint16(0xb0, 2, true);
+    const collision = decodeI3dCollision(data);
+    assert.equal(collision.material, "coll_wall");
+    assert.deepEqual([...collision.positions], [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    assert.deepEqual([...collision.indices], [0, 1, 2]);
 });
 
 /* ---- images ------------------------------------------------------------- */

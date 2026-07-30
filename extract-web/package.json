@@ -1,7 +1,7 @@
 {
   "name": "@ae3/extract",
   "version": "0.1.0",
-  "description": "Client-side asset extraction for the AE3 BGM player: ISO9660 -> DATA.BIN (VFI) -> deflate/PCK -> assets -> OPFS cache",
+  "description": "Client-side Ape Escape 3 extraction for ISO/VFI/PCK audio, FMV, TIM2, and I3D assets",
   "type": "module",
   "private": true,
   "bin": {

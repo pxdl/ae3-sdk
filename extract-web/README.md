@@ -64,6 +64,34 @@ does a `ui_` member-name prefix provide a lower-confidence sprite fallback.
 `roleEvidence` records which tier decided the result; filenames never override
 UIS, I3D, or package evidence.
 
+I3D assets are discovered and decoded from the same containers. Model catalog
+entries include their exact bone-name table so consumers can match skeletal
+animations without guessing from filenames:
+
+```ts
+const assets = await scanModelAssets(disc.vfi);
+const modelAsset = assets.find(asset => asset.kind === "model")!;
+const model = decodeI3dModel(
+    await readModelAsset(disc.vfi, modelAsset),
+    modelAsset.fileName,
+);
+// model.meshes: geometry, UVs, material names, skin joints, inverse bind matrices
+// model.bones: exact names, parents, and world matrices
+
+const animationAsset = assets.find(asset => asset.kind === "animation")!;
+const animation = decodeI3dAnimation(
+    await readModelAsset(disc.vfi, animationAsset),
+    animationAsset.fileName,
+);
+// animation.tracks: key times and normalized xyzw quaternion rotations
+```
+
+`decodeI3dCollision` expands the I3C BVH leaves into indexed triangle geometry.
+`readModelPackage` exposes sibling TIM2 textures and animations without a second
+container parser. The scanner covers `I3D_BIN`, `I3D_I3M`, and `I3D_I3C`;
+camera/non-skeletal tracks whose component 3 does not reference the proven
+quaternion pool retain their time/name metadata with an empty rotation channel.
+
 FMVs use the same parsed `Vfi`; catalog discovery reads no movie payloads.
 Call `vfi.read(asset.movie)` only when a selected movie is prepared or exported:
 
