@@ -29,6 +29,35 @@ await disc.vfi.read(disc.assets.mid[0]);                // stream one asset
 const cache = await OpfsCache.open(disc.cacheKey);      // per-disc OPFS cache
 ```
 
+TIM2 images and sprite sheets use the same `Vfi`. Scanning reads each direct
+`.tm2` and each `.pck` / `.pck.sz` once. The optional callback can persist the
+original texture while it is already in memory:
+
+```ts
+const textures = await scanImageTextures(disc.vfi, {
+    progress(done, total, path) {
+        console.log(`${done}/${total}: ${path}`);
+    },
+    async texture(metadata, sourceTm2) {
+        await cache.write(`images/${metadata.id}.tm2`, sourceTm2);
+    },
+});
+const source = await readImageTexture(disc.vfi, textures[0]);
+const picture = decodeTim2(source, 0);
+// picture.width, picture.height, picture.rgba
+```
+
+`ImageTexture.pictures` records every picture in a multi-picture TIM2.
+`decodeTim2` supports the game's indexed 4-bit and 8-bit textures plus direct
+RGBA16, RGB24, and RGBA32 pictures. It linearizes CSM1 palettes and expands the
+PS2 alpha range from 0..128 to browser RGBA 0..255.
+The returned dimensions always remain the declared TIM2 dimensions; decoding
+does not crop transparent margins.
+`ImageTexture.role` separates UIS-referenced UI/sprites from I3D-referenced
+3D textures. `roleEvidence` distinguishes an exact embedded-name reference
+from the weaker package-level fallback; mixed or unrelated packages remain
+`other` rather than being guessed from dimensions or filenames.
+
 FMVs use the same parsed `Vfi`; catalog discovery reads no movie payloads.
 Call `vfi.read(asset.movie)` only when a selected movie is prepared or exported:
 
@@ -55,9 +84,10 @@ catalog can expose dimensions, field order, frame rate, and display aspect
 without loading whole movies. `indexMpeg2SeekPoints` returns picture count and
 GOP/I-picture byte offsets for bounded playback or packet-preserving export.
 
-Lower-level pieces (`Iso9660`, `Vfi`, `inflateSz`, `unpackPck`, `parseExdb`,
-`bgmSongTable`, …) are exported individually; each is a direct port of its
-Python oracle in `tools/ae3tools/` and `docs/formats/` is the spec for both.
+Lower-level pieces (`Iso9660`, `Vfi`, `inflateSz`, `unpackPck`, `inspectTim2`,
+`decodeTim2`, `parseExdb`, `bgmSongTable`, …) are exported individually; each
+is a direct port of its Python oracle in `tools/ae3tools/`, and
+`docs/formats/` is the spec for both.
 
 ## Bounded file CLI
 

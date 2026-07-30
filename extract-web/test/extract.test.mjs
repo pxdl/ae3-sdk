@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import {
     BytesSource, Iso9660, systemCnfSerial, Vfi, inflateSz,
     unpackPck, memberBytes, typeOf, attrsOf, safeMember, pckFileNames,
+    inspectTim2, decodeTim2, locateImageContainers, scanImageTextures,
+    readImageTexture,
     parseExdb, bgmDescRecords, bgmSongTable, natcmp, sniff, openDisc,
     locateFmvAssets, parseFmvHeader, inspectFmvPrefix, inspectFmvAsset,
     demuxFmv, indexMpeg2SeekPoints, parseFmvSubtitles,
@@ -20,6 +22,41 @@ import {
 } from "./fixtures.mjs";
 const enc = new TextEncoder();
 const bytes = (...v) => Uint8Array.from(v);
+
+function buildTim2(pictures) {
+    const pictureBytes = pictures.map(({ width, height, indices, palette,
+                                         clutType = 0x83 }) => {
+        const imageSize = indices.length;
+        const clutSize = palette.length;
+        const out = new Uint8Array(0x30 + imageSize + clutSize);
+        const view = new DataView(out.buffer);
+        view.setUint32(0, out.length, true);
+        view.setUint32(4, clutSize, true);
+        view.setUint32(8, imageSize, true);
+        view.setUint16(12, 0x30, true);
+        view.setUint16(14, clutSize / 4, true);
+        out[17] = 1;
+        out[18] = clutType;
+        out[19] = 5;                    // IDTEX8
+        view.setUint16(20, width, true);
+        view.setUint16(22, height, true);
+        out.set(indices, 0x30);
+        out.set(palette, 0x30 + imageSize);
+        return out;
+    });
+    const total = 0x10 + pictureBytes.reduce((sum, picture) => sum + picture.length, 0);
+    const out = new Uint8Array(total);
+    out.set(enc.encode("TIM2"), 0);
+    out[4] = 4;
+    out[6] = pictures.length & 0xff;
+    out[7] = pictures.length >> 8;
+    let offset = 0x10;
+    for (const picture of pictureBytes) {
+        out.set(picture, offset);
+        offset += picture.length;
+    }
+    return out;
+}
 
 /* ---- vfi ---------------------------------------------------------------- */
 
@@ -243,6 +280,95 @@ test("pck: members, attrs, naming rules", () => {
                       "cfg.exdb.exdb", "odd.bin"]);
 
     assert.equal(unpackPck(bytes(1, 2, 3, 4)), null);  // not a PCK
+});
+
+/* ---- images ------------------------------------------------------------- */
+
+test("tim2: every picture decodes with PS2 alpha", () => {
+    const texture = buildTim2([
+        {
+            width: 2, height: 1, indices: bytes(0, 1),
+            palette: bytes(255, 0, 0, 0x80, 0, 255, 0, 0x40),
+        },
+        {
+            width: 1, height: 1, indices: bytes(1),
+            palette: bytes(0, 0, 255, 0x80, 255, 255, 0, 0),
+        },
+    ]);
+    assert.deepEqual(inspectTim2(texture).map(picture =>
+        [picture.width, picture.height]), [[2, 1], [1, 1]]);
+    assert.deepEqual([...decodeTim2(texture).rgba],
+        [255, 0, 0, 255, 0, 255, 0, 127]);
+    assert.deepEqual([...decodeTim2(texture, 1).rgba], [255, 255, 0, 0]);
+    assert.throws(() => decodeTim2(texture, 2), /does not exist/);
+});
+
+test("tim2: declared transparent margins are preserved", () => {
+    const texture = buildTim2([{
+        width: 4, height: 1, indices: bytes(0, 0, 1, 1),
+        palette: bytes(0, 0, 0, 0, 255, 255, 255, 0x80),
+    }]);
+    const image = decodeTim2(texture);
+    assert.equal(image.width, 4);
+    assert.equal(image.height, 1);
+    assert.deepEqual([image.rgba[3], image.rgba[7],
+                      image.rgba[11], image.rgba[15]],
+                     [0, 0, 255, 255]);
+});
+
+test("tim2: 256-color CSM1 palettes are linearized", () => {
+    const palette = new Uint8Array(256 * 4);
+    palette.set([255, 0, 0, 0x80], 8 * 4);
+    palette.set([0, 255, 0, 0x80], 16 * 4);
+    const texture = buildTim2([{
+        width: 1, height: 1, indices: bytes(8), palette, clutType: 3,
+    }]);
+    assert.deepEqual([...decodeTim2(texture).rgba], [0, 255, 0, 255]);
+});
+
+test("images: direct and compressed PCK textures scan and re-read", async () => {
+    const direct = buildTim2([{
+        width: 1, height: 1, indices: bytes(0),
+        palette: bytes(10, 20, 30, 0x80),
+    }]);
+    const packedTexture = buildTim2([{
+        width: 2, height: 1, indices: bytes(0, 0),
+        palette: bytes(40, 50, 60, 0x80),
+    }]);
+    const pck = buildPck([
+        { name: "sprite", attrs: "tm2 pictname=face", data: packedTexture },
+        { name: "material", attrs: "tm2", data: packedTexture },
+        { name: "layout", attrs: "uis", data: enc.encode("sprite\0") },
+        { name: "model", attrs: "i3r", data: enc.encode("material\0") },
+        { name: "not_an_image", attrs: "bin", data: bytes(1, 2, 3) },
+    ]);
+    const vfi = await Vfi.open(new BytesSource(buildVfi([
+        { path: "debug/us/static/direct.tm2", data: direct },
+        { path: "debug/us/stage/test/ui.pck.sz", data: await buildSz(pck) },
+        { path: "debug/us/readme.bin", data: bytes(9) },
+    ])));
+    assert.deepEqual(locateImageContainers(vfi).map(entry => entry.name),
+                     ["direct.tm2", "ui.pck.sz"]);
+
+    const seen = [];
+    const progress = [];
+    const textures = await scanImageTextures(vfi, {
+        progress: (done, total, path) => progress.push([done, total, path]),
+        texture: (texture, data) => seen.push([texture.id, data.length]),
+    });
+    assert.equal(textures.length, 3);
+    assert.deepEqual(textures.map(texture => texture.fileName),
+                     ["direct.tm2", "sprite.tm2", "material.tm2"]);
+    assert.deepEqual(textures.map(texture => texture.pictures[0].width), [1, 2, 2]);
+    assert.deepEqual(textures.map(texture => [texture.role, texture.roleEvidence]), [
+        ["other", "direct"],
+        ["sprite", "ui-reference"],
+        ["texture", "model-reference"],
+    ]);
+    assert.equal(seen.length, 3);
+    assert.deepEqual(progress.at(-1), [2, 2, "done"]);
+    assert.deepEqual(await readImageTexture(vfi, textures[0]), direct);
+    assert.deepEqual(await readImageTexture(vfi, textures[2]), packedTexture);
 });
 
 /* ---- exdb --------------------------------------------------------------- */
