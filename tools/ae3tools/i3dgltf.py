@@ -97,6 +97,7 @@ from .i3manim import Anim, bone_names
 FLOAT, USHORT, UINT = 5126, 5123, 5125
 ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER = 34962, 34963
 MAX_INFLUENCES = 4      # JOINTS_0/WEIGHTS_0 are VEC4; the corpus never exceeds 4.
+BLEND_ALPHA_FRACTION = 0.05
 
 
 def _colmajor(m: Mat4):
@@ -227,6 +228,24 @@ def _texture_uri(model_path, matname, texroot, dest):
     return os.path.relpath(cands[0], os.path.dirname(os.path.abspath(dest)))
 
 
+def _texture_alpha_mode(path):
+    """Infer glTF opacity from a converted TIM2 PNG without hiding opaque assets."""
+    try:
+        from PIL import Image
+    except ImportError as ex:
+        raise RuntimeError("Pillow is required to inspect texture alpha for glTF export") from ex
+    with Image.open(path) as image:
+        histogram = image.convert("RGBA").getchannel("A").histogram()
+    total = sum(histogram)
+    zero = histogram[0]
+    partial = sum(histogram[1:250])
+    if partial / max(total, 1) >= BLEND_ALPHA_FRACTION:
+        return "BLEND"
+    if 0 < zero < total:
+        return "MASK"
+    return "OPAQUE"
+
+
 def _keys(quats):
     """Prepare comp3 quaternions for a glTF rotation sampler: normalise, then hemisphere.
 
@@ -344,9 +363,14 @@ def build(model, name, texroot=None, dest=None, anims=None, anim_threshold=0.75,
             images.append({"uri": uri.replace(os.sep, "/"), "name": m})
             textures.append({"source": len(images) - 1, "sampler": 0})
             mat["pbrMetallicRoughness"]["baseColorTexture"] = {"index": len(textures) - 1}
-            # the atlas has hard-edged colour patches; NEAREST keeps the seams crisp
-            # and stops neighbouring patches bleeding into each other
-            mat["alphaMode"] = "MASK"
+            # Texture alpha is not itself the GS material mode: some opaque AE3
+            # textures have an all-zero or sparse-partial alpha channel.
+            source = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(dest)), uri))
+            alpha_mode = _texture_alpha_mode(source)
+            if alpha_mode != "OPAQUE":
+                mat["alphaMode"] = alpha_mode
+            if alpha_mode == "MASK":
+                mat["alphaCutoff"] = 0.5
         materials.append(mat)
 
     # --- bones: world -> parent-relative ---------------------------------------

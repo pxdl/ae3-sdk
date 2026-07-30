@@ -4,7 +4,7 @@ Importable Python package + one `ae3` CLI with a subcommand per tool. Reads
 everything from the user's own game disc; ships no game data.
 
 ```bash
-pip install ./tools[images]     # [images] adds Pillow for render/tm2
+pip install ./tools[images]     # Pillow for render/tm2 and textured glTF alpha modes
 ae3 --help
 ```
 

@@ -560,6 +560,31 @@ interpreter; `ae3 gltf` reuses it.
 - Renders are correct: `ape_slm_body_c` is a **monkey in T-pose** (headless — eyes/head are
   separate files); `arabian_a` is a ground plane with a tent and a tower.
 
+### Material alpha and two-sided geometry
+
+A TIM2 alpha channel is **not** sufficient to recover the GS material mode. Retail
+counterexamples:
+
+- `pl_b_kfu_body1.tm2` is authored with alpha zero on all 16,384 pixels, but its clothing,
+  arms, and legs are opaque. Treating every zero-alpha texel as a cutout removes the body.
+- `pl_g_kfu_zubon.tm2` has only 138 partial-alpha pixels out of 4,096 and no zero-alpha
+  pixels. Enabling blending and disabling depth writes for that sparse tail makes the legs
+  reorder while the camera moves.
+- `s_suimen2.tm2` has partial alpha on every pixel and is a genuine blended water surface;
+  foliage atlases combine zero and opaque texels and need alpha masking.
+
+The material payload's exact GS alpha/test state is not yet decoded. `ae3 gltf` therefore
+uses the corpus-backed conservative rule also used by the browser renderer: `BLEND` when at
+least 5% of texels have alpha in 1..249, otherwise `MASK` when both zero and nonzero texels
+exist, otherwise `OPAQUE`. `OPAQUE` deliberately ignores an all-zero alpha channel.
+
+Do not set glTF `doubleSided` merely because a surface must be visible from both sides.
+Several retail meshes carry explicit opposite-winding copies: `hong_e_partition` has 368
+nondegenerate coincident pairs and `a_hon_e_partition` has 70. Rendering those copies with
+a double-sided material draws both at the same depth and produces camera-dependent
+flicker. The exporter keeps glTF's front-face-culling default, so the authored winding
+selects one copy from each side.
+
 ### Geometry provenance
 
 The mesh payload layout is a port of Murugo's MIT-licensed `mdl2obj.py` for *Rule of Rose*
