@@ -352,9 +352,11 @@ test("images: direct and compressed PCK textures scan and re-read", async () => 
 
     const seen = [];
     const progress = [];
+    const containers = [];
     const textures = await scanImageTextures(vfi, {
         progress: (done, total, path) => progress.push([done, total, path]),
         texture: (texture, data) => seen.push([texture.id, data.length]),
+        container: (entry, data) => containers.push([entry.path, data.length]),
     });
     assert.equal(textures.length, 3);
     assert.deepEqual(textures.map(texture => texture.fileName),
@@ -366,6 +368,8 @@ test("images: direct and compressed PCK textures scan and re-read", async () => 
         ["texture", "model-reference"],
     ]);
     assert.equal(seen.length, 3);
+    assert.deepEqual(containers.map(([path]) => path),
+                     ["debug/us/static/direct.tm2", "debug/us/stage/test/ui.pck.sz"]);
     assert.deepEqual(progress.at(-1), [2, 2, "done"]);
     assert.deepEqual(await readImageTexture(vfi, textures[0]), direct);
     assert.deepEqual(await readImageTexture(vfi, textures[2]), packedTexture);

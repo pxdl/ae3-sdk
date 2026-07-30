@@ -29,17 +29,19 @@ await disc.vfi.read(disc.assets.mid[0]);                // stream one asset
 const cache = await OpfsCache.open(disc.cacheKey);      // per-disc OPFS cache
 ```
 
-TIM2 images and sprite sheets use the same `Vfi`. Scanning reads each direct
-`.tm2` and each `.pck` / `.pck.sz` once. The optional callback can persist the
-original texture while it is already in memory:
+TIM2 images and sprite sheets use the same `Vfi`. The scanner reads direct
+`.tm2` files and `.pck` / `.pck.sz` containers with bounded concurrency.
+`container` is the efficient persistence hook: it runs once for each container
+that yielded an image, while the original bytes are already in memory.
+`texture` remains available when a consumer needs individual TIM2 payloads:
 
 ```ts
 const textures = await scanImageTextures(disc.vfi, {
     progress(done, total, path) {
         console.log(`${done}/${total}: ${path}`);
     },
-    async texture(metadata, sourceTm2) {
-        await cache.write(`images/${metadata.id}.tm2`, sourceTm2);
+    async container(entry, storedBytes) {
+        await cache.write(`image-containers/${entry.entryOff}.bin`, storedBytes);
     },
 });
 const source = await readImageTexture(disc.vfi, textures[0]);
@@ -47,7 +49,9 @@ const picture = decodeTim2(source, 0);
 // picture.width, picture.height, picture.rgba
 ```
 
-`ImageTexture.pictures` records every picture in a multi-picture TIM2.
+`ImageTexture.pictures` records every picture in a multi-picture TIM2. Callback
+delivery remains bounded by the same scan concurrency, so persistence can make
+progress without opening thousands of files at once.
 `decodeTim2` supports the game's indexed 4-bit and 8-bit textures plus direct
 RGBA16, RGB24, and RGBA32 pictures. It linearizes CSM1 palettes and expands the
 PS2 alpha range from 0..128 to browser RGBA 0..255.
