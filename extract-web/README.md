@@ -57,10 +57,12 @@ RGBA16, RGB24, and RGBA32 pictures. It linearizes CSM1 palettes and expands the
 PS2 alpha range from 0..128 to browser RGBA 0..255.
 The returned dimensions always remain the declared TIM2 dimensions; decoding
 does not crop transparent margins.
-`ImageTexture.role` separates UIS-referenced UI/sprites from I3D-referenced
-3D textures. `roleEvidence` distinguishes an exact embedded-name reference
-from the weaker package-level fallback; mixed or unrelated packages remain
-`other` rather than being guessed from dimensions or filenames.
+`ImageTexture.role` first uses exact UIS/I3D references in the texture's own
+package, then unambiguous package context. Assets still unresolved are checked
+against references in other packages. Only when no format reference exists
+does a `ui_` member-name prefix provide a lower-confidence sprite fallback.
+`roleEvidence` records which tier decided the result; filenames never override
+UIS, I3D, or package evidence.
 
 FMVs use the same parsed `Vfi`; catalog discovery reads no movie payloads.
 Call `vfi.read(asset.movie)` only when a selected movie is prepared or exported:

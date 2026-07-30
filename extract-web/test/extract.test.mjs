@@ -375,6 +375,51 @@ test("images: direct and compressed PCK textures scan and re-read", async () => 
     assert.deepEqual(await readImageTexture(vfi, textures[2]), packedTexture);
 });
 
+test("images: global references precede conservative UI name fallback", async () => {
+    const image = buildTim2([{
+        width: 1, height: 1, indices: bytes(0),
+        palette: bytes(10, 20, 30, 0x80),
+    }]);
+    const mixed = buildPck([
+        { name: "ui_cross", attrs: "tm2", data: image },
+        { name: "model_cross", attrs: "tm2", data: image },
+        { name: "ui_guess", attrs: "tm2", data: image },
+        { name: "ui_model", attrs: "tm2", data: image },
+        { name: "ui_conflict", attrs: "tm2", data: image },
+        { name: "local_layout", attrs: "uis", data: enc.encode("none\0") },
+        { name: "local_model", attrs: "i3r", data: enc.encode("ui_model\0") },
+    ]);
+    const references = buildPck([
+        { name: "remote_layout", attrs: "uis",
+          data: enc.encode("ui_cross\0ui_conflict\0") },
+        { name: "remote_model", attrs: "i3r",
+          data: enc.encode("model_cross\0ui_conflict\0") },
+    ]);
+    const vfi = await Vfi.open(new BytesSource(buildVfi([
+        { path: "debug/us/mixed.pck.sz", data: await buildSz(mixed) },
+        { path: "debug/us/references.pck.sz", data: await buildSz(references) },
+    ])));
+    const seen = [];
+    const textures = await scanImageTextures(vfi, {
+        texture: texture => seen.push([
+            texture.fileName, texture.role, texture.roleEvidence,
+        ]),
+    });
+    const roles = textures.map(texture => [
+        texture.fileName, texture.role, texture.roleEvidence,
+    ]);
+    assert.deepEqual(roles, [
+        ["ui_cross.tm2", "sprite", "ui-global-reference"],
+        ["model_cross.tm2", "texture", "model-global-reference"],
+        ["ui_guess.tm2", "sprite", "ui-name-prefix"],
+        ["ui_model.tm2", "texture", "model-reference"],
+        ["ui_conflict.tm2", "other", "unclassified"],
+    ]);
+    assert.deepEqual(seen.toSorted(([left], [right]) => left.localeCompare(right)),
+                     roles.toSorted(([left], [right]) => left.localeCompare(right)));
+});
+
+
 /* ---- exdb --------------------------------------------------------------- */
 
 const BGM_FIELDS = [
