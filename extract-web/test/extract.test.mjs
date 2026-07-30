@@ -11,7 +11,7 @@ import {
     unpackPck, memberBytes, typeOf, attrsOf, safeMember, pckFileNames,
     inspectTim2, decodeTim2, locateImageContainers, scanImageTextures,
     readImageTexture, locateModelContainers, scanModelAssets,
-    decodeI3dAnimation, decodeI3dCollision,
+    decodeI3dModel, decodeI3dAnimation, decodeI3dCollision,
     parseExdb, bgmDescRecords, bgmSongTable, natcmp, sniff, openDisc,
     locateFmvAssets, parseFmvHeader, inspectFmvPrefix, inspectFmvAsset,
     demuxFmv, indexMpeg2SeekPoints, parseFmvSubtitles,
@@ -66,6 +66,66 @@ function buildEmptyI3d() {
     view.setUint32(8, 0x00100001, true);
     view.setUint32(0x10, 0x10, true);
     view.setUint32(0x14, 0x52000000, true);
+    return out;
+}
+
+function buildLitI3d() {
+    const out = new Uint8Array(0x500);
+    const view = new DataView(out.buffer);
+    out.set(enc.encode("I3D_BIN\0"), 0);
+    view.setUint32(8, 0x00100001, true);
+
+    const node = (offset, type, data = 0, children = 0, count = 0) => {
+        view.setUint32(offset, data === 0 ? 0 : data - 0x10, true);
+        view.setUint32(offset + 4, type * 0x01000000 + count, true);
+        view.setUint32(offset + 8, children === 0 ? 0 : children - 0x10, true);
+    };
+    node(0x10, 0x52, 0x210, 0x30, 2);
+    node(0x30, 0x2a, 0x2a0, 0x50, 1);
+    node(0x40, 0x2d, 0, 0x60, 2);
+    node(0x50, 0x59, 0x2b0);
+    node(0x60, 0x46);
+    node(0x70, 0x4b, 0, 0x80, 1);
+    node(0x80, 0x4d, 0x2d0, 0x90, 1);
+    node(0x90, 0x56, 0, 0xa0, 6);
+    node(0xa0, 0x02, 0, 0x120, 1);
+    node(0xb0, 0x03);
+    node(0xc0, 0x03, 0, 0x130, 1);
+    node(0xd0, 0x37);
+    node(0xe0, 0x03, 0, 0x140, 1);
+    node(0xf0, 0x02);
+    node(0x120, 0x30, 0, 0x150, 1);
+    node(0x130, 0x33, 0x300);
+    node(0x140, 0x33, 0x350);
+    node(0x150, 0x02, 0, 0x160, 1);
+    node(0x160, 0x47, 0x3a0, 0x170, 2);
+    node(0x170, 0x03);
+    node(0x180, 0x03, 0, 0x190, 1);
+    node(0x190, 0x33, 0x3d0);
+
+    view.setUint32(0x210 + 0x14, 0x40, true);
+    view.setUint32(0x210 + 0x1c, 0x80, true);
+    for (let index = 0; index < 16; index++)
+        view.setFloat32(0x250 + index * 4, index % 5 === 0 ? 1 : 0, true);
+    view.setUint16(0x290, 0, true);
+    out.set(enc.encode("root\0"), 0x292);
+    view.setUint16(0x2a0, 0xffff, true);
+    view.setUint32(0x2b0, 0x10, true);
+    view.setUint16(0x2b4, 0, true);
+    view.setUint16(0x2b6, 1, true);
+    view.setUint16(0x2c0, 0, true);
+
+    const vectors = (offset, rows) => {
+        out[offset + 6] = rows.length;
+        rows.forEach((row, rowIndex) => row.forEach((value, component) =>
+            view.setFloat32(offset + 0x10 + rowIndex * 0x10 + component * 4,
+                            value, true)));
+    };
+    vectors(0x300, [[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 1, 0]]);
+    vectors(0x350, [[0, 0, 0, 1], [1, 0, 0, 1], [0, 1, 0, 1]]);
+    out[0x3a5] = 3;
+    out.set(bytes(0, 0x80, 0, 1, 1, 0x80, 0, 1, 2, 0, 0, 1), 0x3b0);
+    vectors(0x3d0, [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]]);
     return out;
 }
 
@@ -316,6 +376,14 @@ test("models: every I3D family member is catalogued with a stable source id", as
     ]);
     assert.deepEqual(assets[0].boneNames, []);
     assert.equal(new Set(assets.map(asset => asset.id)).size, 3);
+});
+
+test("i3d: authored normals follow split position and UV vertices", () => {
+    const model = decodeI3dModel(buildLitI3d(), "lit.i3d");
+    assert.equal(model.meshes.length, 1);
+    assert.deepEqual([...model.meshes[0].positions], [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    assert.deepEqual([...model.meshes[0].normals], [0, 1, 0, 1, 0, 0, 0, 0, 1]);
+    assert.deepEqual([...model.meshes[0].indices], [0, 1, 2]);
 });
 
 test("i3m: named quaternion keys decode for realtime skeletal playback", () => {

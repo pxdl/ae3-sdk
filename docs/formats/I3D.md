@@ -549,6 +549,25 @@ interpreter; `ae3 gltf` reuses it.
   whose second child is **empty — no UV buffer at all**; the missing UVs must be padded to
   keep `vt` aligned with `ind`.
 
+### Authored normals and the retail fallback light rig
+
+SubmeshPiece child 2 is an optional normal buffer with the same flat/VIF encoding as the
+child-4 position buffer. When present, its vector count equals the position count. An
+expanded US-disc scan found authored normals on 28,421 of 81,033 piece instances, with
+zero count mismatches; absent normal nodes are meaningful rather than malformed data.
+
+The retail executable constructs its fallback `Scene::LightManager` rig at `0x0027ce10`:
+
+- ambient RGB `(0.6, 0.6, 0.6)`;
+- directional `sun1`, RGB `(0.7, 0.7, 0.7)`, direction `(-1, 1, -1)`;
+- directional `sun2`, RGB `(0.7, 0.7, 0.7)`, direction `(1, 1, 1)`.
+
+Static package entries opt into normal lighting with the `lighting` attribute. Fog and
+light regions are separate scene state, not I3D material fields. The browser viewer uses
+the authored normals with a Lambert/Gouraud approximation of this fallback rig, renders
+pieces without normals unlit, and deliberately adds no invented per-model fog. The exact
+VU1 lighting arithmetic and stage-specific light-region selection remain open.
+
 ### Verification
 
 - **154/154 parse**, 0 failures.

@@ -182,8 +182,8 @@ class Glb:
 
 
 def _weld(piece):
-    """A glTF vertex is one (position, uv) pair; the file indexes those separately."""
-    remap, pos, uvs, idx = {}, [], [], []
+    """A glTF vertex is one (position, normal, uv) tuple; UVs index separately."""
+    remap, pos, normals, uvs, idx = {}, [], [], [], []
     src = []
     for tri in piece.tris:
         for vi, ti in tri:
@@ -192,6 +192,9 @@ def _weld(piece):
                 remap[key] = len(pos)
                 v = piece.vtx[vi]
                 pos.append([v[0], v[1], v[2]])
+                if piece.vn:
+                    n = piece.vn[vi]
+                    normals.append([n[0], n[1], n[2]])
                 uv = piece.vt[ti] if ti < len(piece.vt) else [0.0, 0.0]
                 # V passes through UNFLIPPED. glTF puts TEXCOORD (0,0) at the image's
                 # top-left, and these UVs already index the TIM2 rows top-down. This used
@@ -202,7 +205,7 @@ def _weld(piece):
                 uvs.append([uv[0], uv[1]])
                 src.append(vi)
             idx.append(remap[key])
-    return pos, uvs, idx, src
+    return pos, normals, uvs, idx, src
 
 
 def _texture_uri(model_path, matname, texroot, dest):
@@ -444,9 +447,11 @@ def build(model, name, texroot=None, dest=None, anims=None, anim_threshold=0.75,
         for grp, p in buckets[key]:
             if not p.tris:
                 continue
-            pos, uvs, idx, src = _weld(p)
+            pos, normals, uvs, idx, src = _weld(p)
             attrs = {"POSITION": g.add(pos, FLOAT, "VEC3", ARRAY_BUFFER, minmax=True),
                      "TEXCOORD_0": g.add(uvs, FLOAT, "VEC2", ARRAY_BUFFER)}
+            if normals:
+                attrs["NORMAL"] = g.add(normals, FLOAT, "VEC3", ARRAY_BUFFER)
             j4, w4 = [], []
             if p.skin is not None:
                 for vi in src:

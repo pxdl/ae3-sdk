@@ -223,10 +223,11 @@ class Piece:
     Baking is left to the writer so the glTF exporter can keep vertices unbaked.
     """
 
-    __slots__ = ("vtx", "vt", "tris", "xf", "bone", "skin", "skin_mats", "joints", "ibm")
+    __slots__ = ("vtx", "vn", "vt", "tris", "xf", "bone", "skin", "skin_mats",
+                 "joints", "ibm")
 
     def __init__(self):
-        self.vtx, self.vt, self.tris = [], [], []
+        self.vtx, self.vn, self.vt, self.tris = [], [], [], []
         self.xf = None          # rigid: bone-local -> model
         self.bone = -1          # rigid: owning GLOBAL bone index
         self.skin = None        # skinned: per-vertex [(local_joint, weight), ...]
@@ -325,6 +326,16 @@ def load(path):
                         vnode = spn.children[4].children[0]
                         vcount = _u8(buf, vnode.data + 0x6)
                         p.vtx = _read_buffer(buf, vnode.data, vcount)
+                        # Child 2 is the optional authored normal buffer. Its count
+                        # always matches the vertex buffer when present; pieces without
+                        # it are rendered unlit by the game.
+                        if spn.children[2].children:
+                            nnode = spn.children[2].children[0]
+                            ncount = _u8(buf, nnode.data + 0x6)
+                            if ncount != vcount:
+                                raise ValueError(f"{path}: normal count {ncount} != "
+                                                 f"vertex count {vcount}")
+                            p.vn = _read_buffer(buf, nnode.data, ncount)
 
                         # Skin. Each 0x31 node is ONE joint's influence over a subset of
                         # this piece's vertices -- so a piece has as many 0x31 nodes as
