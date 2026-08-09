@@ -64,6 +64,30 @@ does a `ui_` member-name prefix provide a lower-confidence sprite fallback.
 `roleEvidence` records which tier decided the result; filenames never override
 UIS, I3D, or package evidence.
 
+Stage previews live in the region-prefixed
+`etc/warpgate/str/stages.bin` raw fixed-slot packfile. Other AE3 packfiles put a
+nonzero stored-slot stride at header offset `0x18`; `parsePackfile` inflates each
+bounded SZ slot before parsing the same member stream. IPC inspection identifies
+the meaningful IPU frame separately from its qword padding:
+
+```ts
+const entry = disc.vfi.entries.find(candidate =>
+    candidate.path.endsWith("/etc/warpgate/str/stages.bin"))!;
+const source = await disc.vfi.read(entry);
+const pack = await parsePackfile(source, entry.path);
+const member = pack.slots[0].members.find(candidate => candidate.kind === "ipc")!;
+const ipc = packfileMemberBytes(pack, member);
+const info = inspectIpc(ipc, member.name);
+const ipum = ipcToIpum(ipc, member.name);
+// info.ipuFlags comes from IPC offset 0x0c; ipum contains one unpadded frame
+```
+
+AE3's preview frames store macroblocks in column-major order. `ipcToIpum`
+preserves that order; decoders that assume raster-order IPU macroblocks will
+produce a 16x16-tile-scrambled picture. A consumer must select a
+column-major-aware IPU decoder rather than treating the bridge as conventional
+raster-order MPEG video.
+
 I3D assets are discovered and decoded from the same containers. Model catalog
 entries include their exact bone-name table so consumers can match skeletal
 animations without guessing from filenames:

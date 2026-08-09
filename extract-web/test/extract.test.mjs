@@ -5,11 +5,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { deflateSync } from "node:zlib";
 
 import {
     BytesSource, Iso9660, systemCnfSerial, Vfi, inflateSz,
     unpackPck, memberBytes, typeOf, attrsOf, safeMember, pckFileNames,
-    inspectTim2, decodeTim2, locateImageContainers, scanImageTextures,
+    inspectTim2, decodeTim2, inspectIpc, ipcToIpum,
+    parsePackfile, packfileMemberBytes,
+    locateImageContainers, scanImageTextures,
     readImageTexture, locateModelContainers, scanModelAssets,
     decodeI3dModel, decodeI3dAnimation, decodeI3dCollision,
     parseExdb, bgmDescRecords, bgmSongTable, natcmp, sniff, openDisc,
@@ -56,6 +59,79 @@ function buildTim2(pictures) {
         out.set(picture, offset);
         offset += picture.length;
     }
+    return out;
+}
+
+function buildIpc({
+    version = 1,
+    format = 0x1004,
+    width = 256,
+    height = 256,
+    control = 0x62,
+    macroblocks = bytes(0x49, 0xf8, 0x45),
+} = {}) {
+    const frameSize = macroblocks.length + 4;
+    const payloadSize = (frameSize + 15) & ~15;
+    const out = new Uint8Array(0x10 + payloadSize);
+    const view = new DataView(out.buffer);
+    out.set(enc.encode("ipc\0"));
+    view.setUint16(4, version, true);
+    view.setUint16(6, format, true);
+    view.setUint16(8, width, true);
+    view.setUint16(10, height, true);
+    view.setUint16(12, control, true);
+    view.setUint16(14, payloadSize / 16, true);
+    out.set(macroblocks, 0x10);
+    out.set(bytes(0, 0, 1, 0xb0), 0x10 + macroblocks.length);
+    return out;
+}
+
+function buildPackfile(slots) {
+    const used = slots.map(members =>
+        4 + members.reduce((sum, member) => sum + 0x30 + member.data.length, 0));
+    const slotSize = (Math.max(...used) + 0x7f) & ~0x7f;
+    const out = new Uint8Array(0x40 + slots.length * slotSize);
+    const view = new DataView(out.buffer);
+    out.set(enc.encode("packfile"));
+    view.setUint32(0x10, slots.length, true);
+    view.setUint32(0x14, slotSize, true);
+    slots.forEach((members, slotIndex) => {
+        let offset = 0x40 + slotIndex * slotSize;
+        members.forEach(member => {
+            out.set(enc.encode(`${member.kind}\0`), offset);
+            view.setUint32(offset + 4, member.data.length, true);
+            out.set(enc.encode(`${member.name}\0`), offset + 0x10);
+            out.set(member.data, offset + 0x30);
+            offset += 0x30 + member.data.length;
+        });
+        out.set(enc.encode("end\0"), offset);
+    });
+    return out;
+}
+
+function compressPackfile(source) {
+    const view = new DataView(source.buffer, source.byteOffset, source.byteLength);
+    const slotCount = view.getUint32(0x10, true);
+    const slotSize = view.getUint32(0x14, true);
+    const streams = Array.from({ length: slotCount }, (_, slotIndex) => {
+        const offset = 0x40 + slotIndex * slotSize;
+        const zlib = deflateSync(source.subarray(offset, offset + slotSize));
+        const sz = new Uint8Array(4 + zlib.length - 2);
+        new DataView(sz.buffer).setUint32(0, slotSize, true);
+        sz.set(zlib.subarray(2), 4);
+        return sz;
+    });
+    const storedSlotSize =
+        (Math.max(...streams.map(stream => stream.length)) + 0x1f) & ~0x0f;
+    const out = new Uint8Array(0x40 + slotCount * storedSlotSize);
+    out.set(source.subarray(0, 0x40));
+    const outView = new DataView(out.buffer);
+    outView.setUint32(0x18, storedSlotSize, true);
+    streams.forEach((stream, slotIndex) => {
+        const offset = 0x40 + slotIndex * storedSlotSize;
+        out.set(stream, offset);
+        outView.setUint32(offset + storedSlotSize - 0x10, stream.length, true);
+    });
     return out;
 }
 
@@ -157,6 +233,112 @@ test("vfi: bad magic rejected", async () => {
                          /bad VFI magic/);
 });
 
+
+/* ---- ipc / packfile ----------------------------------------------------- */
+
+test("ipc: control flags bridge to a padding-free one-frame IPUM", () => {
+    const ipc = buildIpc();
+    assert.deepEqual(inspectIpc(ipc, "preview"), {
+        version: 1,
+        format: 0x1004,
+        width: 256,
+        height: 256,
+        control: 0x62,
+        ipuFlags: 0x62,
+        decodeCommand: 0x14,
+        qwordCount: 1,
+        payloadOffset: 0x10,
+        payloadSize: 0x10,
+        frameDataSize: 7,
+        paddingSize: 9,
+    });
+
+    const ipum = ipcToIpum(ipc, "preview");
+    const view = new DataView(ipum.buffer, ipum.byteOffset, ipum.byteLength);
+    assert.equal(new TextDecoder().decode(ipum.subarray(0, 4)), "ipum");
+    assert.equal(view.getUint32(4, true), ipum.length);
+    assert.equal(view.getUint16(8, true), 256);
+    assert.equal(view.getUint16(10, true), 256);
+    assert.equal(view.getUint32(12, true), 1);
+    assert.equal(ipum[0x10], 0x62,
+                 "IPC control byte, not first macroblock byte, is the IPUM flag");
+    assert.equal(ipum[0x11], 0x49);
+    assert.deepEqual(ipum.subarray(0x11), ipc.subarray(0x10, 0x17));
+    assert.equal(sniff(ipc), "ipc");
+    assert.equal(inspectIpc(buildIpc({ version: 0, format: 0 })).decodeCommand,
+                 0x10);
+
+    assert.throws(() => inspectIpc(ipc.subarray(0, -1)), /does not match qword count/);
+    const missingDelimiter = ipc.slice();
+    missingDelimiter[0x16] = 0xb1;
+    assert.throws(() => inspectIpc(missingDelimiter), /0 IPU frame delimiters/);
+    const dirtyPadding = ipc.slice();
+    dirtyPadding[dirtyPadding.length - 1] = 1;
+    assert.throws(() => inspectIpc(dirtyPadding), /nonzero data/);
+});
+
+test("packfile: raw/compressed slots, boundaries and zero-copy payloads", async () => {
+    const ipc = buildIpc();
+    const tim2 = buildTim2([{
+        width: 1,
+        height: 1,
+        indices: bytes(0),
+        palette: bytes(1, 2, 3, 0x80),
+    }]);
+    const bytesInPack = buildPackfile([
+        [
+            { kind: "ipc", name: "tv_alpha_00", data: ipc },
+            { kind: "tm2", name: "tv_alpha_t", data: tim2 },
+        ],
+        [{ kind: "ipc", name: "tv_beta_00", data: ipc }],
+    ]);
+    const pack = await parsePackfile(bytesInPack, "stages.bin");
+    assert.equal(pack.slotCount, 2);
+    assert.equal(pack.slotSize % 0x80, 0);
+    assert.equal(pack.compressed, false);
+    assert.equal(pack.compressedSlotStride, 0);
+    assert.equal(pack.storedSlotSize, pack.slotSize);
+    assert.equal(pack.reservedZero, true);
+    assert.deepEqual(pack.slots.map(slot => slot.members.length), [2, 1]);
+    assert.deepEqual(pack.slots[0].members.map(member =>
+        [member.kind, member.name, member.reservedZero]), [
+        ["ipc", "tv_alpha_00", true],
+        ["tm2", "tv_alpha_t", true],
+    ]);
+    assert.ok(pack.slots.every(slot => slot.paddingZero));
+    assert.deepEqual(packfileMemberBytes(pack, pack.slots[0].members[0]), ipc);
+    assert.equal(sniff(bytesInPack), "packfile");
+
+    const compressed = await parsePackfile(
+        compressPackfile(bytesInPack),
+        "compressed.bin",
+    );
+    assert.equal(compressed.compressed, true);
+    assert.ok(compressed.compressedSlotStride > 0);
+    assert.ok(compressed.slots.every(slot =>
+        slot.compressedSize !== null && slot.storagePaddingZero));
+    assert.deepEqual(
+        packfileMemberBytes(compressed, compressed.slots[1].members[0]),
+        ipc,
+    );
+
+    const crossing = bytesInPack.slice();
+    new DataView(crossing.buffer).setUint32(
+        pack.slots[0].sourceOffset + pack.slots[0].members[0].headerOffset + 4,
+        pack.slotSize,
+        true,
+    );
+    await assert.rejects(parsePackfile(crossing, "crossing"),
+                         /member 0 payload exceeds its packfile slot/);
+
+    const missingEnd = bytesInPack.slice();
+    missingEnd.set(
+        bytes(0, 0, 0, 0),
+        pack.slots[1].sourceOffset + pack.slots[1].markerOffset,
+    );
+    await assert.rejects(parsePackfile(missingEnd, "missing-end"),
+                         /exceeds its packfile slot/);
+});
 /* ---- fmv ---------------------------------------------------------------- */
 
 test("fmv: region-tolerant discovery, subtitle pairing, blank sentinel", async () => {

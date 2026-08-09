@@ -63,13 +63,15 @@ file or sector-by-sector stream decoding. See
 [`wasm/README.md`](wasm/README.md) for the binding API and build details.
 
 `extract-web/` is the TypeScript `@ae3/extract` package. It reads a plain
-2048-byte-sector ISO, walks ISO9660 and DATA.BIN, expands VFI, raw deflate, and
-PCK containers, and can cache extracted assets in OPFS. It also parses the BGM
-database, TIM2 images, I3D models, skinning, skeletal animation, collision,
-FMV containers, subtitle sidecars, display metadata, and MPEG-2 seek points.
-Catalog inspection can read model skeleton names and movie metadata without
-loading unrelated assets. See [`extract-web/README.md`](extract-web/README.md)
-for examples.
+2048-byte-sector ISO, walks ISO9660 and DATA.BIN, expands VFI, raw deflate, PCK,
+and fixed-slot `packfile` containers, and can cache extracted assets in OPFS. It
+also parses the BGM database, TIM2 images, IPC still-image wrappers, I3D models,
+skinning, skeletal animation, collision, FMV containers, subtitle sidecars,
+display metadata, and MPEG-2 seek points. IPC frames can be bridged to a
+conventional one-frame `ipum` stream without treating macroblock data as control
+flags. Catalog inspection can read model skeleton names and movie metadata
+without loading unrelated assets. See
+[`extract-web/README.md`](extract-web/README.md) for examples.
 
 Both JavaScript package manifests are private. They are source packages for
 consumers that vendor or bundle them from this repository rather than published
@@ -136,8 +138,8 @@ Public CI uses synthetic data and runs on clean checkouts:
   with the hashes in `tests/golden.sha256` on Linux and macOS.
 - `node wasm/test/run_vectors.mjs` renders the same vectors through WebAssembly
   and compares them with the native golden hashes.
-- `extract-web` builds a miniature ISO, VFI, PCK, Exdb, and STR fixture to test
-  its parsers and the complete `openDisc` path.
+- `extract-web` builds a miniature ISO, VFI, PCK, packfile, IPC, Exdb, and STR
+  fixture to test its parsers and the complete `openDisc` path.
 - The Python workflow imports every `ae3tools` module and checks the CLI entry
   points.
 

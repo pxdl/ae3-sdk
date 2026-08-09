@@ -41,6 +41,7 @@ from .vfiparse import SECTOR, Vfi
 MAGICS = {
     b"MThd": "midi", b"\x7fELF": "irx", b"SShd": "sndbank", b"EXST": "stream",
     b"VFI\0": "vfi", b"TIM2": "texture", b"PCK\0": "pck",
+    b"ipc\0": "ipc", b"packfile": "packfile",
     b"I3D_BIN\0": "model", b"I3D_I3M\0": "anim", b"I3D_I3C\0": "collision",
     b"I3D_": "i3d_unknown",   # keep last: only reached if the sub-tag is new
 }

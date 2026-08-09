@@ -1,7 +1,7 @@
 {
   "name": "@ae3/extract",
   "version": "0.1.0",
-  "description": "Client-side Ape Escape 3 extraction for ISO/VFI/PCK audio, FMV, TIM2, and I3D assets",
+  "description": "Client-side Ape Escape 3 extraction for ISO/VFI/PCK/packfile audio, image, model, and FMV assets",
   "type": "module",
   "private": true,
   "bin": {
