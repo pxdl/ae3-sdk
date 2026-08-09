@@ -43,6 +43,7 @@ BANKS = {"lfo": "vlfo.hd"}
 # name -> (bank vector, extra serender args)
 SE_RENDERS = {
     "se_exact": ("vec_se.hd", []),
+    "se_expanded": ("vec_se_expanded.hd", []),
     "se_tick": ("vec_se.hd", ["--tick-events"]),
     "se_loop_once": ("vec_se_inf.hd", ["--loop", "0"]),
     "se_loop_forever": ("vec_se_inf.hd", ["--loop", "127"]),
@@ -128,6 +129,7 @@ def main():
                    check=True, capture_output=True)
 
     hashes = {}
+    se_malformed_ok = False
     with tempfile.TemporaryDirectory() as td:
         for name, extra in RENDERS.items():
             mid = name[:-3] if name.endswith("_x2") else name
@@ -149,6 +151,14 @@ def main():
                 check=True, capture_output=True)
             with open(out, "rb") as f:
                 hashes[name] = hashlib.sha256(f.read()).hexdigest()
+        malformed = subprocess.run(
+            [SERENDER, "--seconds", "3", "-o",
+             os.path.join(td, "se_malformed.wav"),
+             os.path.join(VEC, "vec_se_malformed.hd"),
+             os.path.join(VEC, "vec.bd"), "0", "0"],
+            capture_output=True)
+        se_malformed_ok = (
+            malformed.returncode != 0 and b"SE outer entry" in malformed.stderr)
 
         for name, (vec, extra) in EXSTS.items():
             out = os.path.join(td, name + ".wav")
@@ -180,6 +190,10 @@ def main():
         check=True, capture_output=True).stdout
     validate_source_state(source)
     hashes["source_state"] = hashlib.sha256(source).hexdigest()
+    if not se_malformed_ok:
+        print("FAIL se_malformed (expected nonzero exit with 'SE outer entry')")
+        return 1
+    print("PASS se_malformed")
     if update:
         with open(GOLDEN, "w") as f:
             for name, h in sorted(hashes.items()):

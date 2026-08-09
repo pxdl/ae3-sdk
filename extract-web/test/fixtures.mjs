@@ -175,9 +175,9 @@ function startCode(code, payload) {
     return new Builder().u8(0).u8(0).u8(1).u8(code).bytes(payload).build();
 }
 
-function syntheticMpeg(width, height, progressive, topFieldFirst) {
+function syntheticMpeg(width, height, progressive, topFieldFirst, frameRateCode = 4) {
     const sequence = startCode(0xb3, bitBytes([
-        [width, 12], [height, 12], [1, 4], [4, 4],
+        [width, 12], [height, 12], [1, 4], [frameRateCode, 4],
     ]));
     const extension = startCode(0xb5, bitBytes([
         [1, 4], [0x48, 8], [progressive ? 1 : 0, 1], [1, 2],
@@ -208,13 +208,24 @@ function adpcmFrame(header, packedNibble) {
 
 /** Two-group STR with odd field total, leading audio-gap padding and ADPCM
  * predictor history that crosses the group boundary. */
-export function buildFmv({ progressive = true, topFieldFirst = true } = {}) {
+export function buildFmv({
+    progressive = true,
+    topFieldFirst = true,
+    lanes = 1,
+    frameRateCode = 4,
+} = {}) {
+    if (lanes !== 1 && lanes !== 5)
+        throw new Error(`synthetic FMV supports one or five lanes, got ${lanes}`);
     const video = syntheticMpeg(512, progressive ? 320 : 448,
-                                progressive, topFieldFirst);
-    const firstAudio = new Builder()
-        .bytes(adpcmFrame(0x00, 0x11)).bytes(adpcmFrame(0x00, 0x22)).build();
-    const secondAudio = new Builder()
-        .bytes(adpcmFrame(0x10, 0x00)).bytes(adpcmFrame(0x10, 0x00)).build();
+                                progressive, topFieldFirst, frameRateCode);
+    const lanePreload = track => new Builder()
+        .bytes(adpcmFrame(0x00, track === 0 ? 0x11 : 0x31 + track))
+        .bytes(adpcmFrame(0x00, track === 0 ? 0x22 : 0x41 + track)).build();
+    const laneBlock = track => new Builder()
+        .bytes(adpcmFrame(0x10, track === 0 ? 0x00 : 0x11 + track))
+        .bytes(adpcmFrame(0x10, track === 0 ? 0x00 : 0x21 + track)).build();
+    const firstAudio = lanePreload(0);
+    const secondAudio = laneBlock(0);
     const group1 = fmvChunk("GroupOfDataInfo", 0,
                             new Builder().u32(2).u32(1).u32(7).u32(0).build());
     const group2 = fmvChunk("GroupOfDataInfo", 2,
@@ -224,9 +235,25 @@ export function buildFmv({ progressive = true, topFieldFirst = true } = {}) {
 
     const b = new Builder();
     b.str("str").u8(0).u32(0).u32(3).u32(5994).u32(2).pad(12)
-     .u32(48000).u32(2).u32(16).u32(32).u32(32).u32(64)
-     .padTo(0x800).bytes(firstAudio).bytes(group1).bytes(video1)
-     .pad(16).bytes(secondAudio).bytes(group2).bytes(video2);
+     .u32(48000).u32(2).u32(16).u32(32).u32(32).u32(64);
+    if (lanes === 1) {
+        b.padTo(0x800).bytes(firstAudio);
+    } else {
+        const channelGroup = 16 * 2;
+        const leadIn = 5 * 2 * channelGroup;
+        b.padTo(0x800 + leadIn);
+        for (let track = 0; track < lanes; track++)
+            b.bytes(lanePreload(track));
+    }
+    b.bytes(group1).bytes(video1)
+     .pad(16);
+    if (lanes === 1) {
+        b.bytes(secondAudio);
+    } else {
+        for (let track = 0; track < lanes; track++)
+            b.bytes(laneBlock(track));
+    }
+    b.bytes(group2).bytes(video2);
     while (b.length % 0x800) b.u8(0);
     return { bytes: b.build(), video };
 }

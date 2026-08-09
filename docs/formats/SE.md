@@ -17,9 +17,10 @@ a cue plays a fixed key rather than a melodic range.
 > describes the format only; it does not redistribute any asset.
 
 Every claim below is either read from the shipped EE executable (`SCUS_975.01`,
-addresses cited) or measured across the whole 101-bank corpus; the census and
-the parser agree everywhere. Facts that hold in the corpus but are not enforced
-by the driver are marked *(corpus)*.
+addresses cited) or measured from retail/demo disc data. Unqualified corpus
+counts refer to the 101-bank US corpus; §2.1 records the cross-region header
+qualification. Facts that hold in a corpus but are not enforced by the driver
+are marked *(corpus)*.
 
 ---
 
@@ -65,16 +66,69 @@ size prefixes:
 **Only `+0x0C` is validated.** `vab_set` (`FUN_00402938`) checks
 `*(u32*)(bank+0x0C) == 0x64685353 'SShd'` and reads nothing at `+0x00` or
 `+0x04`. So `hd_size` and `bd_size` are informational — an authoring-tool
-artifact the driver never consults. `hd_size` is a genuine under-count: the real
-chunk data runs all the way to EOF (proven by computing the last program's end
-from its own header — it lands at filesize exactly, gap 0, on all 58 banks whose
-last chunk is the SE program chunk), so `filesize − hd_size` is a fixed `0x180`
-that corresponds to no boundary. Our parser still checks both prefixes as a
-sanity gate; neither is load-bearing.
+artifact the driver never consults. `hd_size` is a genuine under-count. In the
+normal layout, the last program reaches EOF exactly and
+`filesize - hd_size == 0x180`; the expanded-authoring variant in §7 has an
+additional `0x180` inside its unknown chunk and therefore uses `0x300`.
+Unlike the driver, the SDK makes these two measured prefix relationships part
+of its bank-family invariant, then requires the complete chunk-slot topology to
+agree (§2.1).
 
 **Mode.** `vab_set` sets the VabDesc kind from `bank+0x7c`:
 `(bank+0x7c == -1) ? 3 : 4`. `+0x7c` is inside the −1 filler on the whole corpus
 (BGM and SE), so the kind is **always 3**; the `4` branch is unreached here.
+
+### 2.1 Region-safe family invariant and direct-disc qualification
+
+The SDK classifies a header from two agreeing structural facts, never from a
+filename, executable serial, or one chunk-slot sentinel. After proving that
+`hd_size <= filesize`, let `T = filesize - hd_size`:
+
+| family | size invariant | required slot topology |
+|---|---|---|
+| BGM | `T == 0` | `program == 0x80`; `seseq == unknown == seprog == -1` |
+| SE | `T ∈ {0x180, 0x300}` | `0 <= seseq < unknown < seprog`; the derived physical SE-program chunk is in range and precedes LFO when present |
+
+For SE, the physical program address is
+`seprog + (T - 0x180)`. The normal layout adds zero; the `0x300` authoring
+variant adds `0x180`, exactly the measured expansion before its program table.
+The melodic program slot may also be present: `mgs_saru` is the hybrid described
+in §1. Family selection still comes from `T`; the slot and physical-boundary
+rules are independent consistency checks. Any other `T`, a partial SE triple,
+an out-of-range derived boundary, or a BGM/SE disagreement is rejected with the
+failed family, slot, or physical-chunk invariant.
+
+This rule was qualified by bounded reads from the original ISO9660 and VFI
+extents; no disc was copied or expanded. Counts are header observations, so the
+five PAL localization trees are counted separately:
+
+| observed corpus | BGM `.hd` | SE `T=0x180` | SE `T=0x300` | accepted SE |
+|---|---:|---:|---:|---:|
+| US retail | 62 | 100 | 1 | 101 |
+| Japanese retail | 62 | 100 | 1 | 101 |
+| Hong Kong/Asia retail | 62 | 100 | 1 | 101 |
+| Korean retail | 62 | 100 | 1 | 101 |
+| PAL retail, five locale trees | 106 | 500 | 5 | 505 |
+| PAL beta, five locale trees | 106 | 500 | 5 | 505 |
+| Japanese store demo | 20 | 20 | 0 | 20 |
+| **total** | **480** | **1,420** | **14** | **1,434** |
+
+All 480 BGM and all 1,434 SE observations satisfy their complete family
+invariant. Each measured 101-bank retail tree therefore remains 101/101; the
+14 `T=0x300` observations are byte-identical copies of the §7 authoring
+variant, not rejected banks. The Korean SE census has 101 accepted banks with
+158 programs and 6,101 tones. Its 2,699 requests contain 7,409 `A0`, 1,478
+`B0`, and 2,699 terminating `FF 2F 00` events. Its command census is
+`01`×108, `02`×112, `07`×233, `0A`×16, `41`×916, and `60`×93.
+
+The Korean retail `boss_specter` header measures `filesize=0xbaa`,
+`hd_size=0xa2a`, hence `T=0x180`. Its six slots are
+`{-1, 0x80, 0xb52, 0x102, 0x466, 0x776}`; it has 97 outer slots, two live
+outer banks (95 and 96), and 30 requests. The `.hd` is byte-identical to the US
+retail header, including `+0x24=0x776`, so the historical
+`hd=2602 vs 2986` failure cannot be reproduced from the on-disc header with the
+old `+0x24 != -1` expression. The private corpus ledger pins the header/body and
+per-request hashes without storing game bytes.
 
 ## 3. The parser relocates the chunk table in place
 
@@ -114,8 +168,9 @@ record + inline 16-byte tones as BGM, but **every SE program is "drum-form"**:
   **no key-range scan and no stack flag** — the melodic machinery BGM uses
   (`BGM.md` §8) does not apply.
 
-Census (100 clean banks + `space_c` via its corrected slot): **156 programs,
-5923 tones, and every tone sample address passes the end-flag test** — each is
+Census (all 101 banks, with the `T=0x300` physical program address derived as
+above): **156 programs, 5923 tones, and every tone sample address passes the
+end-flag test** — each is
 frame-aligned in the `.bd` and immediately preceded by an end-flagged frame,
 exactly the test that validates BGM ([`BGM.md`](BGM.md) §4). The `.bd` codec is
 byte-for-byte the BGM decoder (gate below).
@@ -320,7 +375,7 @@ those three columns are retained design metadata, not playback controls.
 Sequence repetition is authored explicitly by `B0 60`; module reverb is
 controlled through the cue-open `0x10000` flag / system parameter path.
 
-## 7. The other chunks, and the one corrupt bank
+## 7. The other chunks, and the expanded-authoring variant
 
 - **Velocity chunk (`+0x14`, at `0x80`).** `s16 count` (= 0) then a **128-byte
   identity ramp** `0,1,…,127` (101/101) — velocity passes through unchanged, so
@@ -331,20 +386,22 @@ controlled through the cue-open `0x10000` flag / system parameter path.
   waveform + 60-byte amplitude waveform, and the **final entry is EOF-truncated
   to 64 bytes** (60 pitch + 4) on all 43 — identical to the BGM case, and for the
   same reason (the amplitude half is never armed).
-- **Unknown chunk (`+0x20`).** A fixed **784-byte block, byte-identical across
-  all 101 banks** (16-byte header `64 00 …` + 48× 16-byte records with an
+- **Unknown chunk (`+0x20`).** Its standard **784-byte prefix is byte-identical
+  across all 101 banks** (16-byte header `64 00 …` + 48× 16-byte records with an
   incrementing index and constant `{vol 0x64, pan 0x40, 0x04, 0x64}` fields —
-  a default 48-entry parameter table stamped by the authoring tool). `vab_set`
-  resolves it to `bank+0x40` but **no traced code reads it**; being constant, it
-  carries no per-bank information.
-- **`space_c` is shipped corrupt.** Its unknown chunk is bloated by `0x180`
-  (24 duplicated records), which shifts the SE program chunk to `0x8d2` while the
-  header slot still reads the stale `0x752` and the `.hd` tail is `0x300` instead
-  of `0x180`. The driver, reading the stale slot, would misparse it too — the
-  file is effectively broken (an unused `space_*` variant). The tool refuses it
-  by the tail signature rather than silently correcting it; the gate isolates it
-  as the one known-corrupt bank and still codec-checks its `.bd` via the
-  corrected slot.
+  a default parameter table stamped by the authoring tool). `vab_set` resolves
+  it to `bank+0x40` but **no traced code reads it**.
+- **`space_c` is the valid `T=0x300` authoring variant.** It appends 24 duplicate
+  records (`0x180` bytes) to that standard unknown-table prefix. Its ordered
+  header slots are `seseq=0x102`, `unknown=0x442`, and nominal
+  `seprog=0x752`; the family rule derives the physical program table at
+  `0x752 + (0x300 - 0x180) = 0x8d2`, before LFO at `0xd18`.
+  That table has two positional programs, 67 tones, and 33 referenced
+  waveforms; every reference is aligned, in range, and passes the preceding
+  end-flag check. Its 79 outer sequence slots and 27 requests also pass the
+  complete bytecode grammar. All 14 measured regional copies have the same
+  header. The SDK recognizes this structure from `T` plus the ordered slots,
+  never from the bank name or disc region.
 
 ## 8. Runtime and offline playback model
 
@@ -358,8 +415,9 @@ six-bit per-core noise clock from tone byte 2; the source is shared by each
 
 The offline `serender` harness drives this path through the native core:
 
-1. `ae3_synth_load_bank` recognizes the SE slot pattern and parses its positional
-   programs, seseq chunk, and optional LFO table.
+1. `ae3_synth_load_bank` classifies the size-prefix tail and then validates the
+   complete BGM or SE slot topology before parsing positional programs, seseq,
+   and the optional LFO table.
 2. The harness-internal loader resolves exactly the `bank,request` Jam indices
    from §6.4, validates the selected bytecode through `FF 2F 00`, and resets the
    embedded walker.
@@ -459,6 +517,7 @@ SE note-on `FUN_003f8690`, cut-group scan `FUN_003ff7f8`, cue-open
 `FUN_003fc3c8`, `kick3D` `FUN_0035b258`, and SeDesc row loader
 `FUN_001bc0bc`. Source-file and function names are the sg2 library's own
 `.rodata` assert strings (`sg2vab.c` `0x727a60`, `vab_get_seseq` `0x727a70`,
-`vab_loadbybin_hd`/`_bd` `0x7140e8`/`0x714118`). Everything else is a census
-over the 101-bank US corpus. Function-level notes:
+`vab_loadbybin_hd`/`_bd` `0x7140e8`/`0x714118`). Unqualified format counts are
+from the 101-bank US census; §2.1 is the direct-disc regional qualification.
+Function-level notes:
 `decomp/functions_bgm/se/NOTES.md` (private repo).

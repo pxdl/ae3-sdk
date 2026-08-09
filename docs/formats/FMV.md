@@ -1,13 +1,14 @@
 # FMV — the `.str` movie container
 
-The game's full-motion video lives in **22 `.str` movies** inside the DATA.BIN
-(VFI) archive, under `debug/us/movie/*.str` (~861 MB total). Each `.str` is a
-self-describing container holding one movie:
+The US and PAL retail discs each contain **22 `.str` movies** inside the
+DATA.BIN (VFI) archive, under `debug/us/movie/*.str` and
+`debug/uk/movie/*.str`, respectively. The two measured corpora share the same
+header and tagged-video format but use two different audio-lane layouts:
 
 - **Video** is a raw **MPEG-2 elementary stream** — Sony's original bitstream,
   recovered **bit-exact** (never re-encoded), sliced across tagged chunks.
-- **Audio** is **PS-ADPCM, 48 kHz stereo**, stored untagged in the gaps between
-  chunks and decoded to PCM.
+- **Audio** is **PS-ADPCM, 48 kHz stereo**, stored in one or five untagged lanes
+  between chunks and decoded one lane at a time.
 
 Tools in the `ae3tools` package (`ae3` CLI):
 
@@ -23,150 +24,214 @@ proven 7:6 sample aspect. Matching subtitle sidecars are decoded and included as
 SubRip automatically. `ae3 sbt2srt` can decode those sidecars separately (§6);
 `ae3 fmv2mp4 --captions` makes playable captioned `.mp4` convenience copies (§5b).
 
+The CLI examples above describe the US one-lane oracle. The browser SDK's
+`extract-web/src/fmv.ts` inspector and demuxer cover both retail layouts
+measured below.
+
 > The extracted video is Sony's copyrighted content. This document specifies the
 > container format only; the SDK ships no game data. See `NOTICE.md` for the
 > project's data policy.
 
-**The container self-describes.** A hexdump of any movie shows literal ASCII
-`Mpeg2Video` and `GroupOfDataInfo` tags inline in the data — naming the chunks
-names the format. The one trap: **`.str` is not an MPEG program stream.** There
-is no `0x000001BA` pack header and no `0x000001E0` PES header anywhere in any of
-the 22 files — only bare `0x000001B3` sequence headers. ffmpeg/VLC therefore
-cannot open a `.str` directly (which is what makes them look encrypted at first
-glance; they are not). The video is a raw **elementary** stream — fed straight
-to the PS2's IPU, which wants exactly that with no muxing — so concatenating the
-chunk payloads in file order yields a valid `.m2v`.
+**The container self-describes.** Every measured movie contains literal ASCII
+`Mpeg2Video` and `GroupOfDataInfo` tags inline in the data. The one trap:
+**`.str` is not an MPEG program stream.** There is no `0x000001BA` pack header
+or `0x000001E0` video PES header in the concatenated video payload of any of the
+44 measured US/PAL retail files — only the MPEG elementary-stream start codes,
+including `0x000001B3` sequence headers. ffmpeg/VLC therefore cannot open a
+`.str` directly. Concatenating the `Mpeg2Video` payloads in file order yields
+the `.m2v`.
 
 ```
-DATA.BIN            VFI container
-  └─ debug/us/movie/*.str      "str\0" container — 22 movies, ~861 MB
-       ├─ Mpeg2Video chunks     raw MPEG-2 elementary stream (no PS/PES layer)
-       └─ untagged gaps         PS-ADPCM audio, 48 kHz stereo
+DATA.BIN
+  ├─ debug/us/movie/*.str      22 movies, one audio lane
+  └─ debug/uk/movie/*.str      22 movies, one or five audio lanes
+       ├─ Mpeg2Video chunks     raw MPEG-2 elementary stream
+       └─ untagged regions      PS-ADPCM lane preloads and per-group blocks
 ```
 
 ## 1. File header (`0x38` bytes, rest of the 0x800 sector zero-padded)
 
-| off | value (`dolby_pl2`) | meaning |
-|---|---|---|
+The numeric examples below are from a one-lane US file. The fields have the
+same offsets in both layouts; audio sizes are **per lane** in the five-lane
+layout.
+
+| off | example | meaning |
+|---|---:|---|
 | `+0x00` | `"str\0"` | magic |
-| `+0x08` | 251 | **total FIELDS** — not frames. See §4 |
-| `+0x0c` | 5994 | field rate ×100 → **59.94 Hz** → 29.97 fps |
+| `+0x08` | 251 | total 59.94 Hz timeline ticks (§4; historically named `fields`) |
+| `+0x0c` | 5994 | timeline tick rate ×100; this remains 5994 in PAL files |
 | `+0x10` | 14 | `GroupOfDataInfo` count |
 | `+0x20` | 48000 | audio sample rate |
-| `+0x24` | 2 | audio channels |
+| `+0x24` | 2 | channels per audio lane |
 | `+0x28` | `0x400` | per-channel interleave block |
-| `+0x2c` | `0x4000` | audio bytes per group gap |
-| `+0x30` | `0x10000` | audio preload before the first group |
-| `+0x34` | `0x44000` | **total audio bytes** |
+| `+0x2c` | `0x4000` | audio bytes per lane in each non-final group gap |
+| `+0x30` | `0x10000` | preload bytes per audio lane |
+| `+0x34` | `0x44000` | total audio bytes per lane |
 
-`+0x14`/`+0x18`/`+0x1c` vary per file and are **not identified** — nothing in
-the pipeline needs them and no hypothesis survived cross-checking, so they are
-left raw rather than guessed at.
+Let `channel_group = channels * interleave`. The measured headers satisfy:
+
+```
+sample_rate == 48000
+channels == 2
+interleave % 16 == 0
+audio_block % channel_group == 0
+preload % channel_group == 0
+audio_bytes == preload + (groups - 1) * audio_block
+```
+
+The decoder intentionally rejects other sample rates or channel counts: only
+48 kHz stereo is proven in the measured corpora and in the WAV output contract.
+
+`+0x14`/`+0x18`/`+0x1c` vary per file and remain unidentified. No parser
+decision depends on them.
 
 ## 2. Chunk format (uniform for every tag)
 
 ```
-+0x00  char[16]  tag, NUL-padded   ("Mpeg2Video" | "GroupOfDataInfo")
-+0x10  u32       index             video: field index of the chunk's first frame
++0x00  char[16]  exact NUL-padded tag ("Mpeg2Video" | "GroupOfDataInfo")
++0x10  u32       timeline index
 +0x14  u32       payload size
 +0x18  u32[2]    zero
-+0x20  payload, then padding to a 16-byte boundary
++0x20  payload, then zero padding to a 16-byte boundary
 ```
 
-`GroupOfDataInfo` payload is `u32[4]` = `(fields_in_group, video_chunks_in_group, ?, 0)`.
-The third word is **unidentified** — it matches neither the group's video nor
-its audio byte count, and nothing here needs it.
+The entire 16-byte tag field is exact: the name is followed only by zero bytes.
+The two reserved words and every byte of payload padding are zero.
 
-## 3. Audio — where it hides
+`GroupOfDataInfo` payload is `u32[4] =
+(ticks_in_group, video_chunks_in_group, unknown, 0)`. Tick and chunk counts are
+positive. Group header indices equal the cumulative tick count before that
+group. Video indices are nondecreasing and fall within their containing
+group's tick interval. The third payload word remains unidentified.
 
-The audio is **untagged**, so a naive chunk walk from `0x800` dies instantly on
-it. Layout:
+## 3. Audio lanes, preloads, and gaps
+
+The number of audio lanes is not stored in a named header field. It is derived
+from the only two first-group positions proven on retail data. With
+`channel_group = channels * interleave`:
 
 ```
-0x800                      audio preload, hdr.preload (0x10000) bytes
-then repeating:            GroupOfDataInfo | its Mpeg2Video chunks | audio gap
+one-lane first group  = 0x800 + preload
+five-lane first group = 0x800 + 5 * (preload + 2 * channel_group)
 ```
 
-Each gap is **zero padding FIRST, then `hdr.audio_blk` (`0x4000`) bytes of
-ADPCM**, so the audio ends flush against the next chunk. The gaps vary in length
-(`0x4000`…`0x47e0`); the audio inside them does not. The last group carries no
-audio. Cross-checked four ways:
+For the measured values (`preload=0x10000`, `channel_group=0x800`):
 
-- `hdr.audio_total == preload + (groups-1) * audio_blk` — `0x44000 == 0x10000 + 13*0x4000`, exact.
-- the **shortest gap in the file is exactly `0x4000`**, i.e. the case with zero padding.
-- every gap ends on a `0x800` boundary.
-- the leading region of every gap is **all zeros** — 13/13, 59/59, 148/148 gaps
-  across `dolby_pl2`, `scene11`, `play01`. The bytes immediately before the next
-  tag are live ADPCM.
+```
+one lane:
+  0x00000  header sector
+  0x00800  lane 0 preload (0x10000)
+  0x10800  first GroupOfDataInfo
 
-> ⚠ **The audio is END-aligned in the gap. Do not read it from the gap start.**
-> Reading from the start prepends the padding as silence and truncates the same
-> number of real samples *once per group* (~every 0.3 s) — clearly audible as
-> stutter/skipping. The proof is arithmetic: gap 1's padding is `0x120` = 288 B
-> → 288/16*28 = **504 samples**, and a start-aligned decode produces a silence
-> burst of exactly 504 samples at that spot. Reading end-aligned drops the
-> per-group bursts to zero. A validity check on the ADPCM bytes will **not**
-> catch this — zeros are a legal silent frame and pass every sanity test. Only
-> the all-zero *leading* region reveals the layout.
+five lanes:
+  0x00000  header sector
+  0x00800  five-lane lead-in (5 * 2 * 0x800 = 0x5000)
+  0x05800  lane 0 preload (0x10000)
+  0x15800  lane 1 preload
+  0x25800  lane 2 preload
+  0x35800  lane 3 preload
+  0x45800  lane 4 preload
+  0x55800  first GroupOfDataInfo
+```
 
-Channels interleave in `0x400` blocks; **ADPCM predictor state is per-channel
-and must persist across blocks** (decode each channel as one continuous stream,
-not block by block). Codec is standard PS/PS2 SPU ADPCM: 16-byte frames → 28
-samples, 5 filters, shift>12 → 9.
+The `0x5000` five-lane lead-in is structurally bounded but not PS-ADPCM and its
+semantics remain unidentified; it is never decoded. A different first-group
+position is an unsupported layout, not a reason to scan arbitrarily for a tag.
 
-### The audio is ~0.89 s longer than the video, and that is correct
+After each non-final group's video chunks, both layouts use:
 
-Every one of the 22 movies delivers a **constant ~48,600 bytes (0.886 s) more
-audio than the video consumes** — identical for the 4 s bumper and the 160 s
-cutscene alike. That is the streamer's steady-state buffer lead, exactly what a
-preload-then-refill model predicts: delivered `audio_total`, consumed
-`duration × 54,857 B/s`. It is not a sync bug and not a decode error.
-`-shortest` at mux time drops the residue. **Audio starts at t=0 — do not
-"correct" for the preload by shifting it.**
+```
+zero padding (< 0x800 bytes)
+lane 0 audio_block
+[lane 1 audio_block ... lane 4 audio_block]   # five-lane layout only
+next GroupOfDataInfo
+```
 
-## 4. Fields, not frames — the one counter-intuitive bit
+The audio aggregate is **end-aligned** against the next group. Across both
+retail corpora the leading padding is `0x000`…`0x7f0`, always zero. Per-lane
+audio totals still obey the header formula; the five-lane file physically
+carries five times `audio_bytes`, excluding the unidentified lead-in. The SDK
+demuxes lane 0 and validates every lane.
 
-`+0x08` (251) reads like a frame count and **is not**. It counts *fields* at
-59.94 Hz. Three independent checks agree:
+Every decoded range is a whole number of `channel_group` blocks and 16-byte
+ADPCM frames. Proven frame headers have filter `0`…`4`, shift `0`…`12`, and
+flags `0` or `2`; other values are rejected rather than coerced. Channels
+interleave in `0x400` blocks. Predictor history is per channel and persists
+across blocks and group boundaries. Codec arithmetic is standard PS/PS2 SPU
+ADPCM: 16-byte frames produce 28 samples.
 
-1. the `GroupOfDataInfo` field counts sum to **exactly** `+0x08` (13×18 + 17 = 251);
-2. the MPEG-2 sequence header says `frame_rate_code=4` (29.97) — half of 5994/100;
-3. actual decoded frame counts land at ≈ fields/2 across all 22 files —
-   `new_advertise` 6213 fields → **3106** frames (6213/2 = 3106.5), and every
-   other file within a few frames (the deficit is the trailing terminator chunk,
-   payload size 16).
+> **Do not read audio at the raw gap start.** In a one-lane gap that prepends
+> zero padding and truncates the same amount of live audio. In a five-lane gap
+> it also confuses padding and lane boundaries. Locate the next group, subtract
+> `audio_tracks * audio_block`, then select the wanted lane.
 
-## 5. The 22 movies
+### The delivered audio is slightly longer than the video
 
-All 512 px wide, square *stored* samples, 29.97 fps, 48 kHz stereo. **22/22
-decode with zero errors.**
+The selected lane starts at t=0; the preload is a streamer buffer, not a
+timestamp offset. Across the measured retail files, decoded audio exceeds the
+MPEG picture duration by about 0.89–1.19 s. Muxers may use `-shortest` to drop
+the residue. Do not shift audio by the preload duration.
 
-| group | files | height | scan | notes |
-|---|---|---|---|---|
-| `new_scene01`…`12` | 12 | 320 | progressive | story cutscenes, 18 s – 2:40 |
-| `new_play01`…`06` | 6 | 448 | interlaced `tt` | gameplay/demo footage |
-| `new_advertise` | 1 | 320 | progressive | 1:44 attract reel |
-| `new_million` | 1 | 352 | progressive | 1:08 |
-| `new_rc4` | 1 | 448 | interlaced `tt` | 0:39 |
-| `new_dolby_pl2` | 1 | 384 | interlaced `tt` | 4 s Dolby Pro Logic II bumper |
+## 4. Timeline ticks, fields, and frames
 
-Longest: `new_scene03` (2:40, 9578 fields). Shortest: `new_dolby_pl2` (4.19 s).
+`+0x08`, group payload word 0, and chunk indices use the same 59.94 Hz timeline
+counter. The TypeScript API retains the historical property name `fields`, but
+PAL proves that these values are not universally physical display fields:
 
-- The `new_play*` / `new_rc4` / `new_dolby_pl2` streams are **interlaced**
-  (`tt`), confirmed with `idet` (372 TFF / 0 progressive), not just trusting the
-  flag. The `new_scene*` / `advertise` / `million` streams are genuinely
-  progressive (401 progressive / 0 TFF). The `.m2v` and `.mkv` preserve both
-  as-is. Deinterlace at *view* time — doing it at extract time would bake in a
-  lossy transform.
+1. `GroupOfDataInfo` tick counts sum exactly to header `+0x08` in all 44
+   measured retail files.
+2. US video uses MPEG `frame_rate_code=4` (30000/1001 fps), so decoded pictures
+   are approximately `ticks/2`.
+3. PAL video uses MPEG `frame_rate_code=3` (25 fps) while header `+0x0c` remains
+   5994, so decoded pictures are approximately `ticks * 25 / 59.94`.
+4. The small terminal difference is at most nine pictures across the measured
+   corpora and comes from the terminating chunks.
 
-## 5a. Display aspect — SAR 7:6, from the ELF
+Group indices equal cumulative ticks. Video-chunk indices are nondecreasing,
+start at zero, and remain inside the current group's tick interval.
 
-**The streams' own aspect flag is a lie.** Every `.str` sets MPEG-2
-`aspect_ratio_information=1` (square samples), so a player shows the cutscenes at
-1.6:1 and round objects come out visibly too narrow. Square samples are *not*
-how the PS2 displayed them.
+## 5. Retail corpus coverage
 
-Ground truth, read from `SCUS_975.01` rather than guessed:
+Both retail corpora contain 22 movies. All 44 pass the strict chunk walk, audio
+validation, demux, and MPEG metadata inspection.
+
+### US retail
+
+All 22 use the one-lane layout and MPEG 30000/1001 fps.
+
+| files | count | stored size | scan |
+|---|---:|---|---|
+| `new_scene01`…`12`, `new_advertise` | 13 | 512×320 | progressive |
+| `new_play01`…`06`, `new_rc4` | 7 | 512×448 | top-field-first |
+| `new_million` | 1 | 512×352 | progressive |
+| `new_dolby_pl2` | 1 | 512×384 | top-field-first |
+
+### PAL retail
+
+All 22 use MPEG 25 fps. Seventeen use the five-lane layout:
+`new_scene01`…`11` and `new_play01`…`06`. The other five use the one-lane
+layout: `new_scene12`, `new_advertise`, `new_dolby_pl2`, `new_million`, and
+`new_rc4`.
+
+| files | count | stored size | scan |
+|---|---:|---|---|
+| `new_scene01`…`12`, `new_advertise` | 13 | 512×320 | progressive |
+| `new_play01`…`06` | 6 | 512×512 | top-field-first |
+| `new_dolby_pl2` | 1 | 512×448 | progressive |
+| `new_million` | 1 | 512×352 | progressive |
+| `new_rc4` | 1 | 512×384 | progressive |
+
+Region, filename, and disc serial are not parser inputs. The first-group
+formula and MPEG sequence metadata select the supported layout and display
+aspect.
+
+## 5a. Display aspect — NTSC SAR 7:6, PAL SAR 4:3
+
+Every measured stream sets MPEG-2 `aspect_ratio_information=1` (square
+samples), but that flag does not describe how the PS2's non-square framebuffer
+was shown on a 4:3 television.
+
+Ground truth from the display setup in `SCUS_975.01`:
 
 ```
 0x0015af20  addiu a1,zero,1 ; a0=0 ; a2=2 ; a3=0
@@ -174,43 +239,37 @@ Ground truth, read from `SCUS_975.01` rather than guessed:
 0x0015af3c  addiu a3,zero,448       <-- display height
 0x0015af44  addiu a2,zero,512       <-- display width
 0x0015af50  addiu t7,zero,512
-0x0015af58  movn  a3,t7,t6          <-- t6 = PAL flag @0x00635480: PAL -> h=512
-0x0015af60  jal   0x00403f00        <-- set def disp env (a0=&env, a2=w, a3=h)
+0x0015af58  movn  a3,t7,t6          <-- PAL flag: PAL -> h=512
+0x0015af60  jal   0x00403f00        <-- set display environment
 ```
 
-So the game runs a **512×448 NTSC** framebuffer (512×512 PAL) on a 4:3 TV:
+The game therefore presents a 512×448 NTSC framebuffer or a 512×512 PAL
+framebuffer on a 4:3 display:
 
-> **SAR = (4/3) / (512/448) = 7:6** — pixels 16.7 % *wider* than tall.
+```
+NTSC SAR = (4/3) / (512/448) = 7/6
+PAL  SAR = (4/3) / (512/512) = 4/3
+```
 
-The same NTSC/PAL 448/512 select recurs in the render path at `0x005332f0`
-(`sltiu`+`movz` on the same flag), which then converts it to GS fixed-point
-(`sll t5,t5,4`) and centres it against the 2048 GS origin — i.e. the framebuffer
-height really is what the movie quad is laid out against.
+The MPEG sequence selects this without a filename or serial check:
+`frame_rate_code=4` is the measured NTSC corpus and uses 7:6;
+`frame_rate_code=3` is the measured PAL corpus and uses 4:3. Other AE3 frame
+rates are unsupported because no display-aspect rule has been proven for them.
 
-**Three independent confirmations:**
-1. `640 & 448` appear together **nowhere** in `.text`; `512 & 448` appear at 11
-   sites — the framebuffer is 512-wide, so the pixels cannot be square on a 4:3
-   screen.
-2. The `new_play*`/`new_rc4` movies are authored at **exactly 512×448** — the
-   framebuffer height on the nose. Apply SAR 7:6 and they land on **exactly DAR
-   4:3**. A full-screen capture landing precisely on the TV aspect is not a
-   coincidence.
-3. That 1:1 mapping (play\* fills 448 with no vertical scale) means the 320-tall
-   cutscenes are **letterboxed**, not stretched — so SAR 7:6 applies to them
-   too, giving DAR 28:15 (1.867:1), a cinematic letterbox. A stretch-to-fill
-   would instead need SAR **5:6** and make the picture *narrower* — the opposite
-   of what the content shows.
+| region | stored | movies | SAR | resulting DAR |
+|---|---|---|---|---|
+| US | 512×448 | `new_play*`, `new_rc4` | 7:6 | **4:3** |
+| US | 512×320 | `new_scene*`, `new_advertise` | 7:6 | 28:15 |
+| US | 512×384 | `new_dolby_pl2` | 7:6 | 14:9 |
+| US | 512×352 | `new_million` | 7:6 | 56:33 |
+| PAL | 512×512 | `new_play*` | 4:3 | **4:3** |
+| PAL | 512×448 | `new_dolby_pl2` | 4:3 | 32:21 |
+| PAL | 512×384 | `new_rc4` | 4:3 | 16:9 |
+| PAL | 512×352 | `new_million` | 4:3 | 64:33 |
+| PAL | 512×320 | `new_scene*`, `new_advertise` | 4:3 | 32:15 |
 
-| stored | movies | SAR | → DAR |
-|---|---|---|---|
-| 512×448 | `new_play*`, `new_rc4` | 7:6 | **4:3** (full screen) |
-| 512×320 | `new_scene*`, `new_advertise` | 7:6 | 28:15 (1.867:1, letterboxed) |
-| 512×384 | `new_dolby_pl2` | 7:6 | 14:9 |
-| 512×352 | `new_million` | 7:6 | 56:33 |
-
-**Tag it, never rescale it.** `setsar=7/6` (or an `-aspect` remux) costs nothing
-and stays lossless; resampling to 597 px wide would throw away real detail for
-no gain.
+Tag the SAR; never rescale the stored master. Use `setsar=7/6` for the measured
+NTSC streams and `setsar=4/3` for the measured PAL streams.
 
 ## 5b. Convenience `.mp4`s — `ae3 fmv2mp4`
 
@@ -221,10 +280,10 @@ settings:
 
 - **x264 `-crf 15 -preset slow`**, yuv420p — visually lossless against a
   ~3.7 Mbps MPEG-2 source at this resolution.
-- **Interlaced files get `yadif=mode=1` (bob) → 59.94 fps**, detected per file
-  from the stream. Every field becomes its own frame, so all the real motion
-  survives; `mode=0` would halve the frame rate and throw half of it away.
-- **`setsar=7/6`** (§5a) — tagged, not rescaled.
+- **Interlaced files get `yadif=mode=1` (bob)**, detected from the stream:
+  59.94 fps output for NTSC or 50 fps for PAL. Every field becomes a frame;
+  `mode=0` would discard half the temporal motion.
+- **Region-derived SAR** (§5a): 7:6 for measured NTSC, 4:3 for measured PAL.
 - AAC 256k. The source is 4-bit ADPCM (already lossy), so this is transparent in
   practice.
 
@@ -382,44 +441,63 @@ perturbs phase, which is exactly what a matrix decoder steers on.
 
 ## Provenance
 
-Format derived by structural analysis (the tags are self-describing) and
-verified empirically, per the project rule that a claim needs a second source or
-an empirical test:
+The format was derived from the self-describing tags and measured with direct,
+bounded reads from the retail disc images and their VFI extents. No movie was
+copied out of an image and no proprietary payload is stored in this SDK.
 
-- the chunk walk validates and consumes every tagged payload, audio gap, and
-  final sector-padding byte (nonzero unparsed data is an error);
-- per-group video-chunk counts from `GroupOfDataInfo` **sum to exactly** the
-  number of `Mpeg2Video` chunks actually walked (81/81 in `dolby_pl2`) — so no
-  chunk is silently dropped;
-- ffmpeg decodes all 22 results with **0 errors**, at frame counts matching
-  fields/2;
-- frames spot-checked visually (real cutscene/gameplay imagery, no corruption);
-- audio verified as signal, not noise: RMS −15.4 dB with a zero-crossing rate of
-  0.00027. Mis-decoded ADPCM sits near 0 dB RMS with a ZCR ≈ 0.5.
+Measured coverage:
 
-### Verifying the audio — the block-phase test
+| corpus | movies | layouts | groups | video chunks |
+|---|---:|---|---:|---:|
+| US retail | 22 | 22 one-lane | 5,544 | 20,324 |
+| PAL retail | 22 | 5 one-lane, 17 five-lane | 5,635 | 17,327 |
 
-The end-alignment issue (§3) is found and killed with `ffmpeg -af
-silencedetect`, which reports the *timestamp* of every silent interval.
-**Counting silences proves nothing** — cutscenes are full of natural dialogue
-pauses, and `new_scene01` legitimately has 132 of them. The bug's signature is
-*periodicity*, so test the phase instead:
+For all 44 files:
+
+- header arithmetic and zero padding validate;
+- the first group matches exactly one proven layout formula;
+- exact chunk tags, indices, reserved words, payload bounds, and 16-byte
+  padding validate;
+- group tick totals and walked video-chunk totals match their declarations;
+- every non-final gap contains less than one sector of leading zeros followed
+  by exactly one or five complete audio blocks;
+- every lane's ADPCM frame headers, interleave arithmetic, and per-lane byte
+  total validate;
+- final unconsumed data is zero and shorter than one sector;
+- demuxed MPEG metadata reports code 4 / SAR 7:6 for all US files and code 3 /
+  SAR 4:3 for all PAL files.
+
+Asset inspection checks each candidate's 80-byte group/video-header extent
+before issuing a positioned read. The first video payload is capped at
+`0x10000` bytes (the measured maximum is 55,068), and the complete inspection
+prefix is capped at `0x70000` bytes. Malformed header offsets therefore cannot
+turn metadata inspection into a movie-sized read.
+
+Before WAV allocation or header writes, the decoder validates integral
+per-channel ADPCM frame/sample counts, block alignment, byte rate, RIFF `u32`
+sizes, and the final allocation. WAV output is capped at 64 MiB; the largest
+measured retail result is 30,851,116 bytes.
+
+The historical US oracle was additionally decoded with ffmpeg at matching
+frame counts and visually spot-checked. That external decode claim is not
+silently extended to PAL; PAL coverage above records the SDK's structural
+inspection and demux result.
+
+### Verifying end-aligned audio
+
+The one-lane block-phase test remains useful for detecting a start-aligned
+demux:
 
 ```
-block   = audio_blk/2/16*28 / rate   = 0.298667 s   (one group's audio)
-preload = preload  /2/16*28 / rate   = 1.194667 s
-phase(t) = ((t - preload) / block) mod 1     # ~0 => sits ON a block boundary
+block   = audio_block/2/16*28 / rate
+preload = preload/2/16*28 / rate
+phase(t) = ((t - preload) / block) mod 1
 ```
 
-| | mid-content silences | on a block boundary |
-|---|---|---|
-| start-aligned (buggy) | 3 | block index **3.0000, 6.0000, 8.0000** — exact integers |
-| end-aligned (correct) | 0 | — |
+Start-aligned extraction creates silence bursts exactly on block boundaries;
+end-aligned extraction does not. In the five-lane layout, first subtract all
+five lane blocks from the next group offset, then select a lane. Header
+arithmetic, bounds, tags, zero padding, lane count, audio frame headers,
+declared totals, and full container consumption are hard runtime gates. A
+structurally inconsistent file fails without returning a partial demux.
 
-Correctly extracted, silences scatter uniformly (mean phase distance 0.23–0.29,
-where 0.25 is random) — i.e. natural pauses. Anything clustering at phase ≈ 0
-means the gap layout has been misread. Re-run this before trusting a change to
-the audio path. `ae3 strextract` treats header arithmetic, bounds, padding,
-declared group/field/chunk/audio totals, and full container consumption as hard
-runtime validation. A truncated or structurally inconsistent file fails without
-writing a partial result.

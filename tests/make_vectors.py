@@ -151,6 +151,39 @@ def se_bank_hd(stream, bd_len):
     return hd
 
 
+def expanded_se_bank_hd(stream, bd_len):
+    """Synthetic expanded-authoring SE bank with a zero-data 0x180 gap."""
+    normal = se_bank_hd(stream, bd_len)
+    slots = struct.unpack_from("<iiiiii", normal, 0x10)
+    seprog_off = slots[5]
+    assert slots[:3] == (-1, 0x80, -1)
+    assert 0 <= slots[3] < slots[4] < seprog_off
+    expanded = normal[:seprog_off] + bytes(0x180) + normal[seprog_off:]
+    expanded_hd_size = len(expanded) - 0x300
+    expanded = struct.pack("<I", expanded_hd_size) + expanded[4:]
+    assert expanded_hd_size == len(normal) - 0x180
+    assert len(expanded) - expanded_hd_size == 0x300
+    assert seprog_off + 0x180 < len(expanded)
+    return expanded
+
+
+def malformed_se_bank_hd(stream, bd_len):
+    """SE bank with one valid request and a later out-of-range outer entry."""
+    normal = se_bank_hd(stream, bd_len)
+    slots = struct.unpack_from("<iiiiii", normal, 0x10)
+    seq_off, unk_off, seprog_off = slots[3:]
+    sequence = normal[seq_off:unk_off]
+    malformed_sequence = struct.pack("<HHHHH", 1, 6, 0x1000, 0, 10)
+    malformed_sequence += sequence[8:]
+    malformed = bytearray(normal[:seq_off] + malformed_sequence + normal[unk_off:])
+    struct.pack_into("<I", malformed, 0, len(malformed) - 0x180)
+    struct.pack_into("<I", malformed, 0x20, unk_off + 2)
+    struct.pack_into("<I", malformed, 0x24, seprog_off + 2)
+    assert len(malformed_sequence) == len(sequence) + 2
+    assert len(malformed) - struct.unpack_from("<I", malformed, 0)[0] == 0x180
+    return bytes(malformed)
+
+
 # ------------------------------------------------------------- LFO bank (M9)
 # A second bank carrying an LFO chunk (docs/formats/BGM.md "LFO"): two 120-byte
 # entries, each a 60-byte pitch waveform + a 60-byte amplitude half (unread by
@@ -387,6 +420,12 @@ def main():
     hd_se = se_bank_hd(se_stream(), len(BD))
     with open(os.path.join(OUT, "vec_se.hd"), "wb") as f:
         f.write(hd_se)                         # shares vec.bd
+    hd_se_expanded = expanded_se_bank_hd(se_stream(), len(BD))
+    with open(os.path.join(OUT, "vec_se_expanded.hd"), "wb") as f:
+        f.write(hd_se_expanded)                # same request/BD as vec_se
+    hd_se_malformed = malformed_se_bank_hd(se_stream(), len(BD))
+    with open(os.path.join(OUT, "vec_se_malformed.hd"), "wb") as f:
+        f.write(hd_se_malformed)                # expected parser rejection
     hd_se_inf = se_bank_hd(se_stream(0), len(BD))
     with open(os.path.join(OUT, "vec_se_inf.hd"), "wb") as f:
         f.write(hd_se_inf)                     # host loop-control vector
@@ -398,8 +437,10 @@ def main():
     with open(os.path.join(OUT, "vec_stereo.x"), "wb") as f:
         f.write(X_STEREO)
     print(f"vec.hd {len(hd)}B  vlfo.hd {len(hd_lfo)}B  "
-          f"vec_se.hd {len(hd_se)}B  vec_se_inf.hd {len(hd_se_inf)}B  "
-          f"vec.bd {len(BD)}B  vec_mono.x {len(X_MONO)}B  "
+          f"vec_se.hd {len(hd_se)}B  "
+          f"vec_se_expanded.hd {len(hd_se_expanded)}B  "
+          f"vec_se_malformed.hd {len(hd_se_malformed)}B  "
+          f"vec_se_inf.hd {len(hd_se_inf)}B  "
           f"vec_stereo.x {len(X_STEREO)}B  + {len(MIDIS)} midis -> {OUT}")
 
 

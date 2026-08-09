@@ -134,51 +134,80 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
     if (hd_len < 0x80)
         return ae3__fail(s, "hd too small: %zu bytes", hd_len);
     uint32_t hd_sz = rd32(hd), bd_sz = rd32(hd + 4), zero = rd32(hd + 8);
-    bool is_se = rd32(hd + 0x24) != UINT32_MAX;
-    size_t expected_hd = (size_t)hd_sz + (is_se ? 0x180u : 0u);
-    if (expected_hd != hd_len || zero != 0)
-        return ae3__fail(s, "size prefix: hd=%u%s vs %zu, pad=%u", hd_sz,
-                         is_se ? "+0x180" : "", hd_len, zero);
+    if (zero != 0)
+        return ae3__fail(s, "header invariant: word at +0x08 is %u, expected 0", zero);
+    if ((size_t)hd_sz > hd_len)
+        return ae3__fail(s, "bank family invariant: hd_size %u exceeds file size %zu",
+                         hd_sz, hd_len);
+    size_t hd_tail = hd_len - (size_t)hd_sz;
+    if (hd_tail != 0 && hd_tail != 0x180u && hd_tail != 0x300u)
+        return ae3__fail(s, "bank family invariant: filesize - hd_size = %#zx, "
+                         "expected 0 (BGM), 0x180 or 0x300 (SE)", hd_tail);
+    bool is_se = hd_tail != 0;
     if (bd_sz != bd_len)
         return ae3__fail(s, "prefix says bd=%u, real .bd is %zu", bd_sz, bd_len);
     if (memcmp(hd + 0x0C, "SShd", 4) != 0)
         return ae3__fail(s, "no SShd magic at 0x0C");
 
-    /* Six signed chunk offsets at 0x10; -1 = absent. BGM uses +0x10 and leaves
-     * the three SE slots empty; SE uses +0x1C/+0x20/+0x24 and leaves +0x10 empty. */
+    /* Six signed chunk offsets at 0x10; -1 = absent. The size-prefix tail
+     * identifies the family, and this complete slot topology must agree with it:
+     * no filename, serial, or single optional slot is a family discriminator.
+     * The 0x300 SE variant inserts 0x180 bytes before the physical seprog chunk. */
     int32_t prog_off = (int32_t)rd32(hd + 0x10), vel_off = (int32_t)rd32(hd + 0x14);
     int32_t lfo_off = (int32_t)rd32(hd + 0x18);
     int32_t se_seq = (int32_t)rd32(hd + 0x1C), unk5 = (int32_t)rd32(hd + 0x20);
     int32_t se_prog = (int32_t)rd32(hd + 0x24);
+    size_t se_prog_at = 0;
     if (is_se) {
         if (se_seq < 0 || unk5 <= se_seq || se_prog <= unk5)
-            return ae3__fail(s, "bad SE chunks: prog=%#x seq=%#x unk=%#x seprog=%#x",
+            return ae3__fail(s, "SE slot invariant: need 0<=seq<unk<seprog; "
+                             "got prog=%#x seq=%#x unk=%#x seprog=%#x",
                              prog_off, se_seq, unk5, se_prog);
-    } else {
-        if (prog_off != 0x80)
-            return ae3__fail(s, "program chunk at %#x, expected 0x80", prog_off);
-        if (se_seq != -1 || unk5 != -1 || se_prog != -1)
-            return ae3__fail(s, "unexpected SE chunks: %#x %#x %#x",
-                             se_seq, unk5, se_prog);
+        size_t se_prog_shift = hd_tail == 0x300u ? 0x180u : 0;
+        se_prog_at = (size_t)se_prog + se_prog_shift;
+        if (se_prog_at + 2 > hd_len)
+            return ae3__fail(s, "SE physical program invariant: slot=%#x + "
+                             "tail shift=%#zx gives %#zx, hd=%zu",
+                             se_prog, se_prog_shift, se_prog_at, hd_len);
+        if (lfo_off != -1 &&
+            (lfo_off < 0 || (size_t)lfo_off <= se_prog_at ||
+             (size_t)lfo_off + 4 > hd_len))
+            return ae3__fail(s, "SE physical chunk invariant: need "
+                             "seprog=%#zx < lfo=%#x <= hd-4, hd=%zu",
+                             se_prog_at, lfo_off, hd_len);
+    } else if (prog_off != 0x80 || se_seq != -1 || unk5 != -1 || se_prog != -1) {
+        return ae3__fail(s, "BGM slot invariant: need prog=0x80 and "
+                         "seq=unk=seprog=-1; got prog=%#x seq=%#x unk=%#x seprog=%#x",
+                         prog_off, se_seq, unk5, se_prog);
     }
     if (vel_off < 0 || (size_t)vel_off + 2 + 128 > hd_len)
         return ae3__fail(s, "velocity chunk at %#x out of range", vel_off);
 
     bk->se = is_se;
-    size_t B = (size_t)(is_se ? se_prog : prog_off);
+    size_t B = is_se ? se_prog_at : (size_t)prog_off;
     /* Count field is the LAST INDEX, not the count (proof: the MIDI's highest
      * program number equals it exactly on p_7 / j_6 / s_25_jungle). */
     int nprog = rd16(hd + B) + 1;
-    if (B + 2 + (size_t)nprog * 2 > hd_len)
+    size_t prog_table_size = 2 + (size_t)nprog * 2;
+    if (B + prog_table_size > hd_len)
         return ae3__fail(s, "program offset table overruns hd");
     const uint8_t *offs = hd + B + 2;
-    if (rd16(offs) != 2 + (unsigned)nprog * 2)
-        return ae3__fail(s, "first offset %#x != table size %#x", rd16(offs), 2 + nprog * 2);
+    uint16_t first_prog_offset = rd16(offs);
+    if (first_prog_offset != prog_table_size)
+        return ae3__fail(s, "first offset %#x != table size %#x",
+                         (unsigned)first_prog_offset, (unsigned)prog_table_size);
 
     bk->progs = calloc((size_t)nprog, sizeof *bk->progs);
     if (!bk->progs)
         return ae3__fail(s, "out of memory");
     bk->nprogs = nprog;
+    size_t prog_end;
+    if (!is_se)
+        prog_end = (size_t)vel_off;
+    else if (lfo_off != -1)
+        prog_end = (size_t)lfo_off;
+    else
+        prog_end = hd_len;
 
     for (int i = 0; i < nprog; i++) {
         uint16_t o = rd16(offs + i * 2);
@@ -186,8 +215,7 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
             continue;
         size_t a = B + o;
         /* end = next used slot, or the following chunk / EOF for the last slot */
-        size_t b = is_se && lfo_off > (int32_t)B ? (size_t)lfo_off
-                                                 : is_se ? hd_len : (size_t)vel_off;
+        size_t b = prog_end;
         for (int j = i + 1; j < nprog; j++) {
             uint16_t oj = rd16(offs + j * 2);
             if (oj != 0xFFFF) { b = B + oj; break; }
@@ -255,26 +283,59 @@ int ae3__parse_bank(ae3_synth *s, const uint8_t *hd, size_t hd_len,
         size_t S = (size_t)se_seq, send = (size_t)unk5;
         if (send > hd_len || S + 4 > send)
             return ae3__fail(s, "SE sequence chunk span %zu..%zu out of range", S, send);
-        int nb = (int16_t)rd16(hd + S) + 1;
-        if (nb < 1 || S + 2 + (size_t)nb * 2 > send)
+        size_t slen = send - S;
+        const uint8_t *seq = hd + S;
+        int nb = (int16_t)rd16(seq) + 1;
+        if (nb < 1)
+            return ae3__fail(s, "SE outer offset table overruns chunk");
+        size_t outer_size = 2 + (size_t)nb * 2;
+        if (outer_size > slen)
             return ae3__fail(s, "SE outer offset table overruns chunk");
         uint16_t first = 0xffff;
-        for (int i = 0; i < nb && first == 0xffff; i++)
-            first = rd16(hd + S + 2 + (size_t)i * 2);
-        if (first != 2 + (unsigned)nb * 2)
-            return ae3__fail(s, "SE first live outer offset %#x != table size %#x",
-                             first, 2 + nb * 2);
-        bk->seseq_len = send - S;
+        for (int i = 0; i < nb; i++) {
+            uint16_t o = rd16(seq + 2 + (size_t)i * 2);
+            if (o == 0xffff)
+                continue;
+            if (first == 0xffff)
+                first = o;
+            if ((size_t)o < outer_size || (size_t)o + 2 > slen)
+                return ae3__fail(s, "SE outer entry %d invariant: base-relative "
+                                 "offset %#x must be >= %#zx and leave 2 bytes "
+                                 "in chunk %#zx", i, o, outer_size, slen);
+
+            size_t inner = (size_t)o;
+            int nr = (int16_t)rd16(seq + inner) + 1;
+            if (nr < 1)
+                return ae3__fail(s, "SE bank %d inner table invariant: "
+                                 "last-index %d at +%#x gives no entries",
+                                 i, nr - 1, o);
+            size_t inner_size = 2 + (size_t)nr * 2;
+            if (inner + inner_size > slen)
+                return ae3__fail(s, "SE bank %d inner table invariant: +%#x "
+                                 "count %d needs %#zx bytes in chunk %#zx",
+                                 i, o, nr, inner_size, slen);
+            for (int j = 0; j < nr; j++) {
+                uint16_t request = rd16(seq + inner + 2 + (size_t)j * 2);
+                if (request != 0xffff && (size_t)request >= slen)
+                    return ae3__fail(s, "SE bank %d request entry %d invariant: "
+                                     "base-relative offset %#x outside chunk %#zx",
+                                     i, j, request, slen);
+            }
+        }
+        if (first != outer_size)
+            return ae3__fail(s, "SE first live outer offset %#x != table size %#zx",
+                             first, outer_size);
+        bk->seseq_len = slen;
         bk->seseq = malloc(bk->seseq_len);
         if (!bk->seseq)
             return ae3__fail(s, "out of memory");
-        memcpy(bk->seseq, hd + S, bk->seseq_len);
+        memcpy(bk->seseq, seq, bk->seseq_len);
         bk->nsebanks = nb;
     }
 
     /* LFO chunk (M9): same offset-table convention as the program chunk. Entries
      * are 120 B (pitch waveform + amplitude waveform), but only the 60-byte pitch
-     * half must be in range -- s_20_park, the one bank with a chunk, is truncated
+     * half must be in range -- s_20_park, the one BGM bank with a chunk, is truncated
      * by EOF 56 bytes into its amplitude half, and nothing in BGM reads it
      * (docs/formats/BGM.md "LFO"). */
     if (lfo_off != -1) {

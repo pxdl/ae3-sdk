@@ -34,7 +34,7 @@ export interface ImageScanOptions {
     container?: (entry: VfiEntry, bytes: Uint8Array) => void | Promise<void>;
 }
 
-function isTim2(data: Uint8Array): boolean {
+function hasTim2Magic(data: Uint8Array): boolean {
     return data.length >= 4 && data[0] === 0x54 && data[1] === 0x49
         && data[2] === 0x4d && data[3] === 0x32;
 }
@@ -158,12 +158,10 @@ async function scanImageContainer(vfi: Vfi,
     const members = unpackPck(pck);
     if (!members) throw new Error(`${entry.path}: not a PCK`);
     const names = pckFileNames(members);
-    const imageMembers = members.filter(member => {
-        const bytes = memberBytes(pck, member);
-        return typeOf(member.attrs) === "tm2" || isTim2(bytes);
-    });
-    const classification = classifyMembers(pck, members, imageMembers);
-    const images = imageMembers.map(member => {
+    const tim2Members = members.filter(member =>
+        hasTim2Magic(memberBytes(pck, member)));
+    const classification = classifyMembers(pck, members, tim2Members);
+    const images = tim2Members.map(member => {
         const bytes = memberBytes(pck, member);
         const label = `${entry.path}#${member.index}:${member.name}`;
         const role = classification.roles.get(member.index)!;
@@ -211,7 +209,8 @@ function refineUnclassified(textures: ImageTexture[],
 /**
  * Inspect every direct TIM2 and every TIM2 member of every PCK in DATA.BIN.
  * The callback receives each original source texture once, including
- * multi-picture textures, after cross-container role evidence is resolved.
+ * multi-picture textures. Unclassified roles are deferred until cross-container
+ * evidence is resolved; already-classified textures may be delivered per batch.
  * No decoded pixels are retained by the scanner.
  */
 export async function scanImageTextures(vfi: Vfi,
