@@ -20,6 +20,7 @@ import {
     demuxFmv, indexMpeg2SeekPoints, parseFmvSubtitles,
     subtitlesToSrt, subtitlesToVtt,
 } from "../src/index.ts";
+import { FmvFormatError } from "../src/fmv.ts";
 import {
     buildSz, buildPck, buildExdb, buildVfi, buildIso, buildFmv,
     buildFmvSubtitles,
@@ -369,6 +370,23 @@ test("fmv: region-tolerant discovery, subtitle pairing, blank sentinel", async (
     });
 });
 
+test("fmv: incomplete subtitle pairs are scoped discovery issues", async () => {
+    const movie = buildFmv().bytes;
+    const { bin } = buildFmvSubtitles();
+    const vfi = await Vfi.open(new BytesSource(buildVfi([
+        { path: "debug/us/movie/new_play01.str", data: movie },
+        { path: "debug/us/movie/new_scene01.str", data: movie },
+        { path: "debug/us/movie/scene01.bin", data: bin },
+    ])));
+
+    const discoveries = locateFmvAssets(vfi);
+    const playable = discoveries.find(asset => asset.name === "new_play01");
+    const incomplete = discoveries.find(asset => asset.name === "new_scene01");
+    assert.equal(playable?.subtitleBin, null);
+    assert.ok(incomplete?.formatError instanceof FmvFormatError);
+    assert.match(incomplete.formatError.message, /incomplete subtitle pair/);
+});
+
 test("fmv: progressive demux, odd fields, audio alignment and predictor history", () => {
     const fixture = buildFmv();
     const header = parseFmvHeader(fixture.bytes.subarray(0, 0x800), "fixture");
@@ -458,7 +476,11 @@ test("fmv: malformed offsets, padding and truncation fail hard", () => {
     assert.ok(first >= 0 && second >= 0);
     const nonzeroPadding = original.slice();
     nonzeroPadding[second - 33] = 1;
-    assert.throws(() => demuxFmv(nonzeroPadding), /audio-gap padding/);
+    assert.throws(
+        () => demuxFmv(nonzeroPadding),
+        error => error instanceof FmvFormatError
+            && /audio-gap padding/.test(error.message),
+    );
     assert.throws(() => demuxFmv(original.subarray(0, second + 10)),
                   /range|truncated|missing following/);
 });
@@ -476,7 +498,11 @@ test("fmv subtitles: strict UTF-8, timing bounds, spacer removal, SRT and VTT", 
 
     const badUtf8 = fixture.bin.slice();
     badUtf8[fixture.textOffset] = 0xff;
-    assert.throws(() => parseFmvSubtitles(badUtf8, fixture.sbt), /strict UTF-8/);
+    assert.throws(
+        () => parseFmvSubtitles(badUtf8, fixture.sbt),
+        error => error instanceof FmvFormatError
+            && /strict UTF-8/.test(error.message),
+    );
     const badTiming = fixture.sbt.slice();
     new DataView(badTiming.buffer).setFloat32(0x2c, 2.5, true);
     assert.throws(() => parseFmvSubtitles(fixture.bin, badTiming), /invalid range/);

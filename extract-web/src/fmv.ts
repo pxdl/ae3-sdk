@@ -40,6 +40,28 @@ export interface FmvAsset {
     subtitleSbt: VfiEntry | null;
 }
 
+export class FmvFormatError extends Error {
+    readonly source: string;
+    readonly offset: number;
+    readonly detail: string;
+
+    constructor(source: string, offset: number, detail: string) {
+        super(`${source} at 0x${offset.toString(16)}: ${detail}`);
+        this.name = "FmvFormatError";
+        this.source = source;
+        this.offset = offset;
+        this.detail = detail;
+    }
+}
+
+export interface FmvDiscoveryIssue {
+    name: string;
+    movie: VfiEntry;
+    formatError: FmvFormatError;
+}
+
+export type FmvDiscovery = FmvAsset | FmvDiscoveryIssue;
+
 export interface FmvHeader {
     fields: number;
     fieldRate: number;
@@ -121,7 +143,7 @@ interface WavLayout {
 
 
 function fail(source: string, offset: number, message: string): never {
-    throw new Error(`${source} at 0x${offset.toString(16)}: ${message}`);
+    throw new FmvFormatError(source, offset, message);
 }
 
 function requireRange(bytes: Uint8Array, offset: number, size: number,
@@ -184,7 +206,7 @@ function findTag(bytes: Uint8Array, tag: Uint8Array, start: number,
     return -1;
 }
 
-export function locateFmvAssets(vfi: Vfi): FmvAsset[] {
+export function locateFmvAssets(vfi: Vfi): FmvDiscovery[] {
     const movies = vfi.entries.filter(entry =>
         /(^|\/)movie\/[^/]+\.str$/i.test(entry.path));
     if (movies.length === 0) throw new Error("no movie/*.str assets found in DATA.BIN");
@@ -211,7 +233,15 @@ export function locateFmvAssets(vfi: Vfi): FmvAsset[] {
         const subtitleBin = inDirectory.get(`${key}.bin`) ?? null;
         const subtitleSbt = inDirectory.get(`${key}.sbt`) ?? null;
         if ((subtitleBin === null) !== (subtitleSbt === null))
-            throw new Error(`${movie.path}: incomplete subtitle pair for ${key}`);
+            return {
+                name,
+                movie,
+                formatError: new FmvFormatError(
+                    movie.path,
+                    0,
+                    `incomplete subtitle pair for ${key}`,
+                ),
+            };
         return { name, movie, subtitleBin, subtitleSbt };
     }).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
@@ -963,7 +993,8 @@ export function parseFmvSubtitles(bin: Uint8Array, sbt: Uint8Array,
     const timings = parseSubtitleTimings(sbt, `${source} .sbt`);
     const text = parseSubtitleText(bin, `${source} .bin`);
     if (text.length !== timings.starts.length)
-        throw new Error(`${source}: ${text.length} strings != ${timings.starts.length} timings`);
+        fail(source, 0,
+             `${text.length} strings != ${timings.starts.length} timings`);
     return text.map((value, i) => ({
         index: i + 1,
         start: timings.starts[i],
