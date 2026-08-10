@@ -5,6 +5,7 @@ import {
     BytesSource, Vfi, parseFmvHeader, inspectFmvPrefix, inspectFmvAsset,
     demuxFmv,
 } from "../src/index.ts";
+import { FmvFormatError } from "../src/fmv.ts";
 import { buildVfi, buildFmv } from "./fixtures.mjs";
 
 function u32(bytes, offset) {
@@ -190,6 +191,17 @@ test("fmv: asset inspection bounds candidate probes and first video reads", asyn
     );
     assert.ok(videoAsset.source.reads.every(read => read.length <= 0x800),
               JSON.stringify(videoAsset.source.reads));
+});
+
+test("fmv: source short reads stay outside the format-error boundary", async () => {
+    const asset = await openTrackedMovie(buildFmv().bytes);
+    asset.source.read = async (offset, length) =>
+        asset.source.bytes.subarray(offset, offset + Math.max(0, length - 1));
+    await assert.rejects(
+        inspectFmvAsset(asset.vfi, asset.movie, "short source"),
+        error => !(error instanceof FmvFormatError)
+            && /short read/.test(error.message),
+    );
 });
 
 test("fmv: proven audio format and WAV allocation bounds fail before writing", () => {
