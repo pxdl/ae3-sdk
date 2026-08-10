@@ -146,6 +146,10 @@ function fail(source: string, offset: number, message: string): never {
     throw new FmvFormatError(source, offset, message);
 }
 
+function sourceFailure(source: string, offset: number, message: string): never {
+    throw new Error(`${source} at 0x${offset.toString(16)}: ${message}`);
+}
+
 function requireRange(bytes: Uint8Array, offset: number, size: number,
                       source: string, label: string): void {
     const end = offset + size;
@@ -331,12 +335,12 @@ async function readFmvAssetRange(vfi: Vfi, movie: VfiEntry, base: number,
     const absoluteEnd = absolute + size;
     if (!Number.isSafeInteger(absolute) || !Number.isSafeInteger(absoluteEnd)
             || absolute < 0 || absoluteEnd > vfi.src.size)
-        fail(source, offset,
-             `${label} ends past source EOF 0x${vfi.src.size.toString(16)}`);
+        sourceFailure(source, offset,
+                      `${label} ends past source EOF 0x${vfi.src.size.toString(16)}`);
     const data = await vfi.src.read(absolute, size);
     if (data.length !== size)
-        fail(source, offset + data.length,
-             `short read (${data.length} of ${size} ${label} bytes)`);
+        sourceFailure(source, offset + data.length,
+                      `short read (${data.length} of ${size} ${label} bytes)`);
     return data;
 }
 
