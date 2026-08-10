@@ -26,8 +26,9 @@ export {
     type Packfile, type PackfileSlot, type PackfileMember,
 } from "./packfile.ts";
 export { locateImageContainers, scanImageTextures, readImageTexture,
-         type ImageTexture, type ImageScanOptions, type ImageRole,
-         type ImageRoleEvidence } from "./images.ts";
+         type ImageTexture, type ImageScanIssue, type ImageScanResult,
+         type ImageScanOptions, type ImageRole, type ImageRoleEvidence } from "./images.ts";
+export { ImageFormatError, type ImageFormat } from "./image-format.ts";
 export {
     locateModelContainers, scanModelAssets, readModelAsset, readModelPackage,
     inspectI3dModel, decodeI3dModel, decodeI3dAnimation, decodeI3dCollision,

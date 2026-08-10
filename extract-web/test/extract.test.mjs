@@ -733,11 +733,13 @@ test("images: direct and compressed PCK textures scan and re-read", async () => 
     const seen = [];
     const progress = [];
     const containers = [];
-    const textures = await scanImageTextures(vfi, {
+    const result = await scanImageTextures(vfi, {
         progress: (done, total, path) => progress.push([done, total, path]),
         texture: (texture, data) => seen.push([texture.id, data.length]),
         container: (entry, data) => containers.push([entry.path, data.length]),
     });
+    const textures = result.textures;
+    assert.deepEqual(result.issues, []);
     assert.equal(textures.length, 3);
     assert.deepEqual(textures.map(texture => texture.fileName),
                      ["direct.tm2", "sprite.tm2", "material.tm2"]);
@@ -780,11 +782,13 @@ test("images: global references precede conservative UI name fallback", async ()
         { path: "debug/us/references.pck.sz", data: await buildSz(references) },
     ])));
     const seen = [];
-    const textures = await scanImageTextures(vfi, {
+    const result = await scanImageTextures(vfi, {
         texture: texture => seen.push([
             texture.fileName, texture.role, texture.roleEvidence,
         ]),
     });
+    const textures = result.textures;
+    assert.deepEqual(result.issues, []);
     const roles = textures.map(texture => [
         texture.fileName, texture.role, texture.roleEvidence,
     ]);

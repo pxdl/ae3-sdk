@@ -33,10 +33,13 @@ TIM2 images and sprite sheets use the same `Vfi`. The scanner reads direct
 `.tm2` files and `.pck` / `.pck.sz` containers with bounded concurrency.
 `container` is the efficient persistence hook: it runs once for each container
 that yielded an image, while the original bytes are already in memory.
+Proven TIM2/PCK/SZ format violations after a successful VFI read are returned
+as bounded `scan.issues`; source reads, aborts, resource failures, callbacks,
+and unexpected exceptions still reject the scan.
 `texture` remains available when a consumer needs individual TIM2 payloads:
 
 ```ts
-const textures = await scanImageTextures(disc.vfi, {
+const scan = await scanImageTextures(disc.vfi, {
     progress(done, total, path) {
         console.log(`${done}/${total}: ${path}`);
     },
@@ -44,6 +47,8 @@ const textures = await scanImageTextures(disc.vfi, {
         await cache.write(`image-containers/${entry.entryOff}.bin`, storedBytes);
     },
 });
+const textures = scan.textures;
+// scan.issues contains only bounded, sanitized TIM2/PCK/SZ format failures.
 const source = await readImageTexture(disc.vfi, textures[0]);
 const picture = decodeTim2(source, 0);
 // picture.width, picture.height, picture.rgba

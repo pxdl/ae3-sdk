@@ -758,6 +758,15 @@ allocated blank (its whole CLUT is zero) and filled at runtime.
 zero direct-colour — so only two decode paths are needed. Zero size mismatches across the
 217 non-mipmapped pictures.
 
+### Browser API failure boundary
+
+`scanImageTextures` returns `{ textures, issues }`. After a VFI payload read
+succeeds, a proven TIM2, PCK, or SZ container-format violation is isolated to
+one bounded, sanitized issue for that container, and valid neighboring
+containers remain catalogued. The scanner does not turn VFI/source reads,
+abort or other resource failures, operational decompression failures, callback
+failures, or unexpected exceptions into issues: those remain scan-fatal.
+
 Two things the ELF does not settle, both proven from data:
 
 - **Alpha is 0..128, not 0..255.** Across all **45072** RGBA32 CLUT entries, **zero** bytes
