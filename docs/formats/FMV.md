@@ -31,9 +31,10 @@ measured below.
 ### Browser API failure boundary
 
 `FmvFormatError` identifies only proven container or subtitle-format
-violations. `locateFmvAssets()` reports an incomplete `.bin`/`.sbt` subtitle
-pair as an `FmvDiscoveryIssue` carrying that error, so the affected movie can
-be listed as unavailable without discarding valid neighboring movies.
+violations. `locateFmvAssets()` reports a missing member of a matching
+`new_sceneNN` `.bin`/`.sbt` sidecar pair as an `FmvDiscoveryIssue` carrying
+that error, so the affected movie can be listed as unavailable without
+discarding valid neighboring movies.
 
 I/O failures and unexpected exceptions are deliberately not converted to
 `FmvFormatError`. A caller may isolate `FmvFormatError` to one asset, but must
