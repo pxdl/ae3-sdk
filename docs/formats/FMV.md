@@ -28,6 +28,19 @@ The CLI examples above describe the US one-lane oracle. The browser SDK's
 `extract-web/src/fmv.ts` inspector and demuxer cover both retail layouts
 measured below.
 
+### Browser API failure boundary
+
+`FmvFormatError` identifies only proven container or subtitle-format
+violations. `locateFmvAssets()` reports an incomplete `.bin`/`.sbt` subtitle
+pair as an `FmvDiscoveryIssue` carrying that error, so the affected movie can
+be listed as unavailable without discarding valid neighboring movies.
+
+I/O failures and unexpected exceptions are deliberately not converted to
+`FmvFormatError`. A caller may isolate `FmvFormatError` to one asset, but must
+abort the scan for VFI/source read failures, rejected file reads, `DOMException`
+errors, and unrecognized exceptions. This boundary prevents a transient source
+failure from being persisted as a poisoned partial catalog.
+
 > The extracted video is Sony's copyrighted content. This document specifies the
 > container format only; the SDK ships no game data. See `NOTICE.md` for the
 > project's data policy.
