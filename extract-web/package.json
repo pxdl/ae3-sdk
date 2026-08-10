@@ -5,7 +5,8 @@
   "type": "module",
   "private": true,
   "bin": {
-    "ae3-extract": "./bin/ae3-extract.mjs"
+    "ae3-extract": "./bin/ae3-extract.mjs",
+    "ae3-report": "./bin/ae3-report.mjs"
   },
   "exports": {
     ".": "./src/index.ts"

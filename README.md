@@ -71,6 +71,12 @@ Catalog inspection can read model skeleton names and movie metadata without
 loading unrelated assets. See [`extract-web/README.md`](extract-web/README.md)
 for examples.
 
+The extractor also includes `ae3-report`, a bounded-read command that generates
+a versioned JSON compatibility report or a Markdown support-table row from a
+user-supplied ISO. It scans images, effect-bank pairs, and FMV metadata through
+the same TypeScript parsers used by browser consumers. See the extractor README
+for the exact checks and their limits.
+
 Both JavaScript package manifests are private. They are source packages for
 consumers that vendor or bundle them from this repository rather than published
 npm packages.

@@ -123,6 +123,29 @@ Lower-level pieces (`Iso9660`, `Vfi`, `inflateSz`, `unpackPck`, `inspectTim2`,
 is a direct port of its Python oracle in `tools/ae3tools/`, and
 `docs/formats/` is the spec for both.
 
+## Disc support report
+
+`bin/ae3-report.mjs` runs reproducible catalog checks against a user-supplied
+disc image:
+
+```sh
+node bin/ae3-report.mjs --iso /path/to/disc.iso
+node bin/ae3-report.mjs --iso /path/to/disc.iso \
+  --format markdown --label "US retail (SCUS_975.01)"
+```
+
+The default JSON report is versioned and deterministic. It records the disc
+serial, volume ID, DATA.BIN table hash, per-family counts, and individual
+issues. Image checks parse PCK/SZ containers and inspect every usable TIM2.
+Effects checks select the same best-populated `sound/se` tree as the app, read
+every HD/BD pair, and validate the `SShd` header. FMV checks discover the movie
+set, validate subtitle pairing, and inspect enough of every STR to parse its
+MPEG metadata.
+
+The report measures catalog compatibility. It does not claim that a movie was
+played or that an effect request was rendered; record those manual checks
+separately. Use `--output PATH` to write either format to a file.
+
 ## Bounded file CLI
 
 `bin/ae3-extract.mjs` exposes the same ISO/VFI parsers to local tooling without
