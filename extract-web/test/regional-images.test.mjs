@@ -9,7 +9,7 @@ import {
     readImageTexture,
     scanImageTextures,
 } from "../src/index.ts";
-import { buildPck, buildVfi } from "./fixtures.mjs";
+import { buildPck, buildSz, buildVfi } from "./fixtures.mjs";
 
 const enc = new TextEncoder();
 
@@ -40,6 +40,23 @@ function buildMalformedTim2() {
     return out;
 }
 
+class ThrowingSource {
+    constructor(bytes) {
+        this.bytes = bytes;
+        this.failOffset = null;
+    }
+
+    get size() {
+        return this.bytes.length;
+    }
+
+    async read(offset, length) {
+        if (offset === this.failOffset)
+            throw new Error("injected image source read failure");
+        return this.bytes.subarray(offset, offset + length);
+    }
+}
+
 test("images: non-magic tm2 member is skipped while direct and packed images survive", async () => {
     const direct = buildZeroTim2();
     const packed = buildPck([
@@ -55,7 +72,9 @@ test("images: non-magic tm2 member is skipped while direct and packed images sur
         locateImageContainers(vfi).map(entry => entry.path).toSorted(),
         ["assets/direct.tm2", "assets/regional.pck"],
     );
-    const textures = await scanImageTextures(vfi);
+    const result = await scanImageTextures(vfi);
+    const textures = result.textures;
+    assert.deepEqual(result.issues, []);
     assert.equal(textures.length, 2);
     assert.deepEqual(
         textures.map(texture => texture.fileName).toSorted(),
@@ -75,23 +94,81 @@ test("images: non-magic tm2 member is skipped while direct and packed images sur
     }
 });
 
-test("images: malformed magic-bearing member rejects with container and member context", async () => {
-    const pck = buildPck([
+test("images: malformed container is isolated while a valid neighbor and callbacks survive", async () => {
+    const broken = buildPck([
         { name: "broken_member", attrs: "tm2", data: buildMalformedTim2() },
     ]);
     const vfi = await Vfi.open(new BytesSource(buildVfi([
-        { path: "assets/regional-broken.pck", data: pck },
+        { path: "assets/regional-broken.pck", data: broken },
+        { path: "assets/valid-neighbor.tm2", data: buildZeroTim2() },
     ])));
+    const seenTextures = [];
+    const seenContainers = [];
+    const result = await scanImageTextures(vfi, {
+        texture: texture => seenTextures.push(texture.fileName),
+        container: entry => seenContainers.push(entry.path),
+    });
+
+    assert.deepEqual(result.textures.map(texture => texture.fileName),
+                     ["valid-neighbor.tm2"]);
+    assert.equal(result.issues.length, 1);
+    assert.equal(result.issues[0].path, "assets/regional-broken.pck");
+    assert.equal(result.issues[0].format, "TIM2");
+    assert.match(result.issues[0].reason,
+                 /assets\/regional-broken\.pck#0:broken_member:/);
+    assert.match(result.issues[0].reason, /picture 0 header exceeds TIM2 data/);
+    assert.deepEqual(seenTextures, ["valid-neighbor.tm2"]);
+    assert.deepEqual(seenContainers, ["assets/valid-neighbor.tm2"]);
+});
+
+test("images: source read failures stay scan-fatal", async () => {
+    const source = new ThrowingSource(buildVfi([
+        { path: "assets/read-fails.tm2", data: buildZeroTim2() },
+    ]));
+    const vfi = await Vfi.open(source);
+    source.failOffset = vfi.byteOffset(vfi.find("assets/read-fails.tm2"));
 
     await assert.rejects(
         () => scanImageTextures(vfi),
-        error => {
-            assert.match(
-                String(error),
-                /assets\/regional-broken\.pck#0:broken_member:/,
-            );
-            assert.match(String(error), /picture 0 header exceeds TIM2 data/);
-            return true;
-        },
+        /injected image source read failure/,
+    );
+});
+
+test("images: unexpected inflater failures stay scan-fatal", async () => {
+    const packed = buildPck([
+        { name: "valid", attrs: "tm2", data: buildZeroTim2() },
+    ]);
+    const source = new BytesSource(buildVfi([
+        { path: "assets/unexpected.pck.sz", data: await buildSz(packed) },
+    ]));
+    const vfi = await Vfi.open(source);
+    const original = globalThis.DecompressionStream;
+    globalThis.DecompressionStream = class {
+        constructor() {
+            throw new Error("injected unexpected inflater failure");
+        }
+    };
+    try {
+        await assert.rejects(
+            () => scanImageTextures(vfi),
+            /injected unexpected inflater failure/,
+        );
+    } finally {
+        globalThis.DecompressionStream = original;
+    }
+});
+
+test("images: callback failures stay scan-fatal", async () => {
+    const vfi = await Vfi.open(new BytesSource(buildVfi([
+        { path: "assets/callback-fails.tm2", data: buildZeroTim2() },
+    ])));
+
+    await assert.rejects(
+        () => scanImageTextures(vfi, {
+            container: () => {
+                throw new Error("injected image callback failure");
+            },
+        }),
+        /injected image callback failure/,
     );
 });
